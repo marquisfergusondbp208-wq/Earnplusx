@@ -4247,42 +4247,58 @@ async def my_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             # ── Status line ───────────────────────────────────────────
             if user_mode == "hourly":
-                h_status = r.get("hourly_status", "offline")
+                # FIXED: Safe access for sqlite3.Row
+                try:
+                    h_status = r["hourly_status"] if "hourly_status" in r.keys() else "offline"
+                except:
+                    h_status = "offline"
                 status   = r["status"]
                 if status == "online" and h_status == "online":
                     emoji = "🟢"
                     label = "ONLINE"
-                    start_time = r.get("hourly_start_time")
-                    if start_time:
-                        try:
+                    try:
+                        start_time = r["hourly_start_time"]
+                        if start_time:
                             start = datetime.fromisoformat(str(start_time).replace(" ", "T"))
                             secs  = int((datetime.utcnow() - start).total_seconds())
                             hrs   = secs // 3600
                             mins  = (secs % 3600) // 60
                             label += f" · {hrs}h {mins}m" if hrs else f" · {mins}m"
-                        except Exception:
-                            pass
+                    except Exception:
+                        pass
                 elif status == "pairing":
                     emoji, label = "🟡", "PAIRING"
                 else:
                     emoji, label = "🔴", "OFFLINE"
 
-                tot_h = r.get("total_hours_earned") or 0
+                try:
+                    tot_h = r["total_hours_earned"] if "total_hours_earned" in r.keys() else 0
+                except:
+                    tot_h = 0
                 line  = f"{emoji} `{account}`  {label}"
                 if tot_h:
                     line += f"  📊 {tot_h}h earned"
-                if r.get("pair_code"):
-                    line += f"\n   🔑 Code: `{r['pair_code']}`"
+                try:
+                    if r["pair_code"]:
+                        line += f"\n   🔑 Code: `{r['pair_code']}`"
+                except:
+                    pass
             else:
                 status = r["status"]
                 emoji  = "🟢" if status == "online" else (
                          "🟡" if status == "pairing" else "🔴")
                 line   = f"{emoji} `{account}`  {status}"
-                if r.get("pair_code"):
-                    line += f"\n   🔑 Code: `{r['pair_code']}`"
-                msgs = r.get("msgs_sent") or 0
-                if msgs:
-                    line += f"  ✉️ {msgs} msgs"
+                try:
+                    if r["pair_code"]:
+                        line += f"\n   🔑 Code: `{r['pair_code']}`"
+                except:
+                    pass
+                try:
+                    msgs = r["msgs_sent"] if "msgs_sent" in r.keys() else 0
+                    if msgs:
+                        line += f"  ✉️ {msgs} msgs"
+                except:
+                    pass
 
             lines.append(line)
 
