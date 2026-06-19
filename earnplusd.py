@@ -6879,7 +6879,6 @@ async def show_wsjobs_settings(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     else:
         await update.message.reply_text("❌ No WSJOBS credentials found in database!\nUse `/set_wsjobs <username> <password>` to set them.")
-        )
 
 async def update_spinner_message(msg, new_text: str):
     """Lightweight edit helper for messages outside the spinner system."""
