@@ -5791,23 +5791,23 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             f"• Payout interval: when users get paid"
         )
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=admin_panel_markup)
-        
+
     elif data == "admin_set_task4u":
-    current_user = get_setting("wsjobs_account", "")
-    await query.edit_message_text(
-        f"🔐 *Set WSJOBS (Hourly Mode) Credentials*\n\n"
-        f"Current username: `{current_user or 'NOT SET'}`\n\n"
-        f"Send new credentials using:\n"
-        f"`/set_wsjobs <username> <password>`\n\n"
-        f"Example: `/set_wsjobs Frankhustle f11111`\n\n"
-        f"Use `/wsjobs_creds` to view current settings\n"
-        f"Use `/reset_wsjobs` to force re-login after changing",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("◀️ Back to Admin Panel", callback_data="admin_back")
-        ]])
-    )
-    return
+        current_user = get_setting("wsjobs_account", "")
+        await query.edit_message_text(
+            f"🔐 *Set WSJOBS (Hourly Mode) Credentials*\n\n"
+            f"Current username: `{current_user or 'NOT SET'}`\n\n"
+            f"Send new credentials using:\n"
+            f"`/set_wsjobs <username> <password>`\n\n"
+            f"Example: `/set_wsjobs Frankhustle f11111`\n\n"
+            f"Use `/wsjobs_creds` to view current settings\n"
+            f"Use `/reset_wsjobs` to force re-login after changing",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Back to Admin Panel", callback_data="admin_back")
+            ]])
+        )
+        return
 
     elif data == "admin_force_hourly":
         await query.edit_message_text(
