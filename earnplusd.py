@@ -3177,7 +3177,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ])
     
-    is_new = not db_user.get("earning_mode")
+    # FIXED: Check if earning_mode is None (new user)
+    # db_user could be sqlite3.Row or dict, so use safe access
+    try:
+        earning_mode = db_user.get("earning_mode") if hasattr(db_user, "get") else db_user["earning_mode"]
+    except:
+        earning_mode = None
+    
+    is_new = earning_mode is None
     if is_new:
         greeting = "🌟 *Welcome to EarnPlus!*"
     else:
@@ -6981,16 +6988,15 @@ async def post_init(app):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, cleanup_orphaned_numbers)
     
-    # ============ START TASK4U LOGIN (Hourly Mode) ============
-    def start_task4u_login():
-        try:
-            task4u_login()
-            log.info("[Task4U] Initial login complete")
-        except Exception as e:
-            log.error(f"[Task4U] Initial login failed: {e}")
-    
-    # Run Task4U login in thread pool to avoid blocking
-    await loop.run_in_executor(None, start_task4u_login)
+    # ============ START WSJOBS LOGIN (Hourly Mode) ============
+def start_wsjobs_login():
+    try:
+        wsjobs_login()
+        log.info("[WSJOBS] Initial login complete")
+    except Exception as e:
+        log.error(f"[WSJOBS] Initial login failed: {e}")
+
+await loop.run_in_executor(None, start_wsjobs_login)
     
     # ============ START TELETHON WORKER (Auto Mode) ============
     log.info("[Bot] post_init: starting Telethon task worker...")
