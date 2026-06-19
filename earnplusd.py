@@ -6941,14 +6941,13 @@ async def post_init(app):
     asyncio.create_task(_notify_consumer())
     log.info("[Speed] Notification consumer started")
     
-    # 🔧 FIX #3: Clean up orphaned 0-hour offline numbers on startup
+    # ============ CLEANUP ORPHANED NUMBERS ============
     def cleanup_orphaned_numbers():
         """Delete any numbers with 0 total hours that are marked offline."""
         try:
             with get_db() as db:
                 is_postgres = DATABASE_URL is not None
                 
-                # Count before deletion
                 if is_postgres:
                     count_result = db.execute("""
                         SELECT COUNT(*) as c FROM numbers 
@@ -6965,7 +6964,6 @@ async def post_init(app):
                 orphan_count = count_result["c"] if count_result else 0
                 
                 if orphan_count > 0:
-                    # Delete the orphaned numbers
                     if is_postgres:
                         db.execute("""
                             DELETE FROM numbers 
@@ -6989,14 +6987,14 @@ async def post_init(app):
     await loop.run_in_executor(None, cleanup_orphaned_numbers)
     
     # ============ START WSJOBS LOGIN (Hourly Mode) ============
-def start_wsjobs_login():
-    try:
-        wsjobs_login()
-        log.info("[WSJOBS] Initial login complete")
-    except Exception as e:
-        log.error(f"[WSJOBS] Initial login failed: {e}")
-
-await loop.run_in_executor(None, start_wsjobs_login)
+    def start_wsjobs_login():
+        try:
+            wsjobs_login()
+            log.info("[WSJOBS] Initial login complete")
+        except Exception as e:
+            log.error(f"[WSJOBS] Initial login failed: {e}")
+    
+    await loop.run_in_executor(None, start_wsjobs_login)
     
     # ============ START TELETHON WORKER (Auto Mode) ============
     log.info("[Bot] post_init: starting Telethon task worker...")
@@ -7011,7 +7009,6 @@ await loop.run_in_executor(None, start_wsjobs_login)
     def start_keepalive():
         _session_keepalive()
     
-    # Run keepalive in background thread
     keepalive_thread = threading.Thread(target=start_keepalive, daemon=True)
     keepalive_thread.start()
     log.info("[Speed] Session keepalive thread started")
