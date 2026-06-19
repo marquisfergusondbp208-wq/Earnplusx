@@ -78,6 +78,9 @@ UA = ("Mozilla/5.0 (Linux; Android 13; V2116 Build/TP1A.220624.014_NONFC) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.120 Mobile Safari/537.36")
 SHARED_SECRET = os.getenv("SHARED_SECRET", "Frankpat1@")
 
+# ADD THIS LINE RIGHT HERE:
+DATABASE_URL = os.getenv("DATABASE_URL")  # Railway auto-injects this
+
 # WSJOBS (simpletasks234.com) for Hourly Mode
 WSJOBS_BASE_URL = os.getenv("WSJOBS_BASE_URL", "https://admin.simpletasks234.com")
 # DELETE or COMMENT these:
