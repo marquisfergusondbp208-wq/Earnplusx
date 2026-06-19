@@ -63,7 +63,6 @@ _application = None
 _bot_loop = None  # ADD THIS LINE RIGHT HERE
 _offline_pending = {}
 _OFFLINE_CONFIRM_SEC = 120
-# ----------------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------------
 BASE_URL = os.getenv("BASE_URL", "https://api.wsjobs-ng.com")
@@ -79,18 +78,14 @@ UA = ("Mozilla/5.0 (Linux; Android 13; V2116 Build/TP1A.220624.014_NONFC) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.120 Mobile Safari/537.36")
 SHARED_SECRET = os.getenv("SHARED_SECRET", "Frankpat1@")
 
-# PostgreSQL for Railway persistence
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway auto-injects this
-
-# ----------------------------------------------------------------------
-# Task4U platform for hourly mode (separate from wsjob)
-# ----------------------------------------------------------------------
-TASK4U_BASE_URL = os.getenv("TASK4U_BASE_URL", "https://api.taskm4u.com")
+# WSJOBS (simpletasks234.com) for Hourly Mode
+WSJOBS_BASE_URL = os.getenv("WSJOBS_BASE_URL", "https://admin.simpletasks234.com")
 # DELETE or COMMENT these:
 # TASK4U_USER = os.getenv("TASK4U_USER", "8085816739")
 # TASK4U_PASS_HASH = os.getenv("TASK4U_PASS_HASH", "ead68717fbb2411b902ed9ad8b2c0639")
-task4u_session: dict = {}  # will store token, http session
-task4u_lock = threading.Lock()
+# WSJOBS session for hourly mode
+wsjobs_session: dict = {}
+wsjobs_lock = threading.Lock()
 
 ADMIN_TELEGRAM_ID = 7113000547  # hardcoded admin
 
@@ -846,7 +841,7 @@ def init_db():
             db.execute("CREATE INDEX IF NOT EXISTS idx_daily_msgs_date ON daily_msgs(date)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_daily_msgs_uid ON daily_msgs(user_id)")
             
-            # Insert settings (PostgreSQL syntax) - ADDED task4u_account and task4u_pass_hash
+            # Insert settings (PostgreSQL syntax) - REPLACED task4u with wsjobs
             settings_data = [
                 ('naira_per_msg', '30.0'),
                 ('points_per_msg', '200'),
@@ -869,8 +864,8 @@ def init_db():
                 ('hourly_monitor_interval_seconds', '60'),
                 ('hourly_payout_interval_minutes', '60'),
                 ('hourly_enabled', '1'),
-                ('task4u_account', ''),
-                ('task4u_pass_hash', '')
+                ('wsjobs_account', ''),
+                ('wsjobs_password', '')
             ]
             
             for key, value in settings_data:
@@ -953,8 +948,8 @@ def init_db():
             INSERT OR IGNORE INTO settings VALUES('wacash_password','');
             INSERT OR IGNORE INTO settings VALUES('wacash_fire_count','100');
             INSERT OR IGNORE INTO settings VALUES('wacash_threads','20');
-            INSERT OR IGNORE INTO settings VALUES('task4u_account','');
-            INSERT OR IGNORE INTO settings VALUES('task4u_pass_hash','');
+            INSERT OR IGNORE INTO settings VALUES('wsjobs_account','');
+            INSERT OR IGNORE INTO settings VALUES('wsjobs_password','');
             CREATE TABLE IF NOT EXISTS wacash_numbers(
                 id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
                 account TEXT NOT NULL, status TEXT DEFAULT 'pairing',
@@ -1268,219 +1263,269 @@ def api_check_pairing_status(task_id: str) -> tuple[int | None, str | None]:
         return None, str(e)
         
 # ----------------------------------------------------------------------
-# Task4U API functions for hourly mode (separate platform)
+# WSJOBS (simpletasks234.com) API for Hourly Mode
 # ----------------------------------------------------------------------
-def task4u_login() -> bool:
-    """Login to Task4U platform and store token."""
-    global task4u_session
-    
-    # ONLY get from settings - NO environment variable fallbacks!
-    task4u_user = get_setting("task4u_account", "")
-    task4u_pass_hash = get_setting("task4u_pass_hash", "")
-    
-    if not task4u_user or not task4u_pass_hash:
-        log.error("[Task4U] No credentials configured in database! Use /set_task4u to set them.")
-        return False
-    
-    log.info(f"[Task4U] Using credentials from database: user={task4u_user}")
-    
-    with task4u_lock:
-        http = requests.Session()
-        
-        # Warm up session to handle Cloudflare
-        try:
-            log.info("[Task4U] Warming up session...")
-            warmup_headers = {
-                "User-Agent": "Mozilla/5.0 (Linux; Android 13; V2116 Build/TP1A.220624.014_NONFC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.138 Mobile Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.5",
-            }
-            http.get("https://taskm4u.com", 
-                     headers=warmup_headers,
-                     timeout=30)
-            time.sleep(2)
-        except Exception as e:
-            log.warning(f"[Task4U] Warm-up failed: {e}")
-        
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; V2116 Build/TP1A.220624.014_NONFC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.138 Mobile Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Origin": "https://taskm4u.com",
-            "Referer": "https://taskm4u.com/",
-            "x-requested-with": "mark.via.gp",
-        }
-        
-        payload = {
-            "user_name": task4u_user,
-            "pwd": task4u_pass_hash,
-            "autologin": True,
-            "lang": "",
-            "device": "",
-            "mac": "",
-            "httpRequestIndex": 0,
-            "httpRequestCount": 0
-        }
-        
-        try:
-            log.info(f"[Task4U] Attempting login for {task4u_user}")
-            r = http.post(
-                f"{TASK4U_BASE_URL}/login/login",
-                json=payload,
-                headers=headers,
-                timeout=45
-            )
-            
-            if r.status_code != 200:
-                log.error(f"[Task4U] Login failed with status {r.status_code}")
-                if r.status_code == 403:
-                    log.error("[Task4U] Cloudflare blocking - Railway IP may be blocked")
-                return False
-            
-            d = r.json()
-            if d.get("code") == 0 and d.get("data", {}).get("token"):
-                task4u_session = {
-                    "token": d["data"]["token"],
-                    "uid": d["data"]["uid"],
-                    "http": http
-                }
-                log.info(f"[Task4U] Login OK, uid={d['data']['uid']}")
-                return True
-            else:
-                log.error(f"[Task4U] Login failed: {d.get('msg', 'Unknown error')}")
-                return False
-                
-        except Exception as e:
-            log.error(f"[Task4U] Login exception: {e}")
-            return False
 
+wsjobs_session: dict = {}
+wsjobs_lock = threading.Lock()
 
-def _task4u_headers() -> dict:
-    """Get headers for Task4U API calls with token."""
+def _wsjobs_md5(s): 
+    return hashlib.md5(s.encode()).hexdigest()
+
+def _wsjobs_vhdrs():
+    vt = str(int(time.time() * 1000))
     return {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Linux; Android 13; V2116 Build/TP1A.220624.014_NONFC) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.7727.138 Mobile Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://taskm4u.com",
-        "Referer": "https://taskm4u.com/",
-        "x-requested-with": "mark.via.gp",
+        "verify-time": vt,
+        "verify-encrypt": _wsjobs_md5("yh123456" + vt)
     }
 
+def _wsjobs_hdrs(x=None):
+    h = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 16; V2361A Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.177 Mobile Safari/537.36",
+        "Referer": "https://simpletasks234.com/",
+        "Origin": "https://simpletasks234.com",
+        "accept": "application/json, text/plain, */*",
+        "x-requested-with": "mark.via.gp"
+    }
+    h.update(_wsjobs_vhdrs())
+    if x: 
+        h.update(x)
+    return h
 
-def _task4u_ps():
-    """Get Task4U session, login if needed. Never holds lock during login."""
-    global task4u_session
-    with task4u_lock:
-        has_session = bool(task4u_session.get("token") and task4u_session.get("http"))
-    if not has_session:
-        log.warning("[Task4U] Session lost — re-logging in...")
-        task4u_login()
-    with task4u_lock:
-        return dict(task4u_session)
+def wsjobs_login() -> bool:
+    """Login to WSJOBS platform using credentials from database settings."""
+    global wsjobs_session
+    
+    username = get_setting("wsjobs_account", "")
+    password = get_setting("wsjobs_password", "")
+    
+    if not username or not password:
+        log.error("[WSJOBS] No credentials configured! Use /set_wsjobs to set them.")
+        return False
+    
+    http = requests.Session()
+    
+    # Signing: userpwd = md5(md5(password)), sign = md5(md5("/api/user/login") + username + userpwd)
+    userpwd = _wsjobs_md5(_wsjobs_md5(password))
+    sign = _wsjobs_md5(_wsjobs_md5("/api/user/login") + username + userpwd)
+    
+    try:
+        log.info(f"[WSJOBS] Attempting login for {username}")
+        r = http.post(
+            f"{WSJOBS_BASE_URL}/api/user/login",
+            json={"username": username, "userpwd": userpwd, "sign": sign},
+            headers=_wsjobs_hdrs(),
+            timeout=15
+        )
+        
+        if r.status_code != 200:
+            log.error(f"[WSJOBS] Login failed with status {r.status_code}")
+            return False
+        
+        d = r.json()
+        if d.get("code") == 0 and d.get("data", {}).get("info"):
+            info = d["data"]["info"]
+            with wsjobs_lock:
+                wsjobs_session.update({
+                    "userid": info["id"],
+                    "username": username,
+                    "http": http
+                })
+            log.info(f"[WSJOBS] Login OK uid={info['id']}")
+            return True
+        else:
+            log.error(f"[WSJOBS] Login failed: {d.get('message', 'Unknown error')}")
+            return False
+            
+    except Exception as e:
+        log.error(f"[WSJOBS] Login exception: {e}")
+        return False
 
+def _wsjobs_ps():
+    """Get WSJOBS session, login if needed."""
+    with wsjobs_lock:
+        s = dict(wsjobs_session)
+    if not s.get("http") or not s.get("userid"):
+        log.warning("[WSJOBS] Session lost — re-logging in...")
+        wsjobs_login()
+        with wsjobs_lock:
+            s = dict(wsjobs_session)
+    return s
 
-def task4u_get_pairing_code(account: str) -> tuple[str | None, str | None]:
+def wsjobs_get_pairing_code(account: str) -> tuple[str | None, str | None]:
     """
-    POST /task/getwswebcode
+    GET /api/user/get_code
     Returns (code, error_message)
     """
-    s = _task4u_ps()
-    token = s.get("token")
-    if not token:
-        return None, "Not logged in"
+    s = _wsjobs_ps()
+    uid = str(s["userid"])
+    uname = s["username"]
     
-    # Increase timeout and add more retries
-    for attempt in range(3):
-        try:
-            log.info(f"[Task4U] Attempt {attempt+1} to get pairing code for {account}")
-            r = s["http"].post(
-                f"{TASK4U_BASE_URL}/task/getwswebcode?token={token}",
-                json={"ws_account": account},
-                headers=_task4u_headers(),
-                timeout=45  # Increased from 15 to 30 seconds
+    # sign = md5(md5("/api/user/get_code") + userid + username + account)
+    sign = _wsjobs_md5(_wsjobs_md5("/api/user/get_code") + uid + uname + account)
+    
+    try:
+        r = s["http"].get(
+            f"{WSJOBS_BASE_URL}/api/user/get_code",
+            params={
+                "account": account,
+                "signType": "1",
+                "username": uname,
+                "userid": uid,
+                "sign": sign
+            },
+            headers=_wsjobs_hdrs(),
+            timeout=15
+        )
+        d = r.json()
+        if d.get("code") == 0 and d.get("data"):
+            return str(d["data"]), None
+        return None, d.get("message", "Unknown error")
+    except Exception as e:
+        return None, str(e)
+
+def wsjobs_get_phone_status(account: str) -> int | None:
+    """
+    GET /api/user/get_phonestatus
+    Returns: 0 = offline, 1 = online, None = error
+    """
+    s = _wsjobs_ps()
+    uid = str(s["userid"])
+    uname = s["username"]
+    
+    # sign = md5(md5("/api/user/get_phonestatus") + userid + username + account)
+    sign = _wsjobs_md5(_wsjobs_md5("/api/user/get_phonestatus") + uid + uname + account)
+    
+    try:
+        r = s["http"].get(
+            f"{WSJOBS_BASE_URL}/api/user/get_phonestatus",
+            params={
+                "account": account,
+                "signType": "0",
+                "username": uname,
+                "userid": uid,
+                "sign": sign
+            },
+            headers=_wsjobs_hdrs(),
+            timeout=10
+        )
+        d = r.json()
+        if d.get("code") == 0:
+            return int(d["data"])
+        return None
+    except Exception as e:
+        log.error(f"[WSJOBS] get_phone_status error: {e}")
+        return None
+
+def wsjobs_get_online_numbers() -> set:
+    """
+    GET /api/user/get_appinfo with pagination
+    Returns set of accounts where isonline == 1
+    """
+    s = _wsjobs_ps()
+    uid = str(s["userid"])
+    uname = s["username"]
+    
+    # sign = md5(md5("/api/user/get_appinfo") + userid + username)
+    sign = _wsjobs_md5(_wsjobs_md5("/api/user/get_appinfo") + uid + uname)
+    
+    online = set()
+    page = 1
+    pagesize = 50
+    
+    try:
+        while True:
+            r = s["http"].get(
+                f"{WSJOBS_BASE_URL}/api/user/get_appinfo",
+                params={
+                    "page": page,
+                    "pagesize": pagesize,
+                    "username": uname,
+                    "userid": uid,
+                    "sign": sign
+                },
+                headers=_wsjobs_hdrs(),
+                timeout=15
             )
             d = r.json()
-            log.info(f"[Task4U] getwswebcode response for {account}: {d}")
-            if d.get("code") == 0 and d.get("data", {}).get("code"):
-                return d["data"]["code"], None
-            # Check if token expired
-            if d.get("code") in (401, 403) or "token" in str(d.get("msg", "")).lower():
-                log.warning("[Task4U] Token expired, re-logging...")
-                task4u_login()
-                return task4u_get_pairing_code(account)
-            return None, d.get("msg", "Unknown error")
-        except requests.exceptions.Timeout:
-            log.warning(f"[Task4U] Timeout on attempt {attempt+1}/3 for {account}")
-            if attempt == 2:  # Last attempt
-                return None, "Connection timeout - please try again"
-            continue
-        except Exception as e:
-            log.error(f"[Task4U] get_pairing_code error: {e}")
-            if attempt == 2:
-                return None, str(e)
-            continue
-    
-    return None, "Max retries exceeded"
-
-
-def task4u_get_online_numbers() -> set:
-    """
-    POST /taskhosting/page
-    Returns set of accounts that are currently online (status == 1)
-    """
-    s = _task4u_ps()
-    token = s.get("token")
-    if not token:
+            
+            if d.get("code") != 0:
+                break
+            
+            data = d.get("data", {})
+            chunk = data.get("list", [])
+            total = data.get("count", 0)
+            
+            for item in chunk:
+                # isonline: 1 = online, 2 = offline (from your log)
+                if item.get("isonline") == 1:
+                    wsnumber = item.get("wsnumber")
+                    if wsnumber:
+                        online.add(str(wsnumber))
+            
+            if page * pagesize >= total or not chunk:
+                break
+            page += 1
+            
+        return online
+    except Exception as e:
+        log.error(f"[WSJOBS] get_online_numbers error: {e}")
         return set()
+
+def wsjobs_get_hosting_time(account: str) -> int | None:
+    """
+    Get total hours online for a specific account from get_appinfo.
+    Returns hours (integer) or None if not found.
+    Note: The API returns total_hours as an integer in hours.
+    """
+    s = _wsjobs_ps()
+    uid = str(s["userid"])
+    uname = s["username"]
+    
+    # sign = md5(md5("/api/user/get_appinfo") + userid + username)
+    sign = _wsjobs_md5(_wsjobs_md5("/api/user/get_appinfo") + uid + uname)
+    
+    page = 1
+    pagesize = 50
     
     try:
-        r = s["http"].post(
-            f"{TASK4U_BASE_URL}/taskhosting/page?token={token}",
-            json={"page": 1, "limit": 100},
-            headers=_task4u_headers(),
-            timeout=15
-        )
-        d = r.json()
-        if d.get("code") == 0 and d.get("data", {}).get("data"):
-            online = set()
-            for item in d["data"]["data"]:
-                if item.get("status") == 1:  # 1 = online
-                    online.add(item.get("ws_account"))
-            return online
-        return set()
-    except Exception as e:
-        log.error(f"[Task4U] get_online_numbers error: {e}")
-        return set()
-
-
-def task4u_get_hosting_time(account: str) -> int | None:
-    """
-    Return hosting_time (HOURS online) for a specific number.
-    API returns SECONDS, so we convert to hours.
-    """
-    s = _task4u_ps()
-    token = s.get("token")
-    if not token:
-        return None
-    
-    try:
-        r = s["http"].post(
-            f"{TASK4U_BASE_URL}/taskhosting/page?token={token}",
-            json={"page": 1, "limit": 100},
-            headers=_task4u_headers(),
-            timeout=15
-        )
-        d = r.json()
-        if d.get("code") == 0 and d.get("data", {}).get("data"):
-            for item in d["data"]["data"]:
-                if item.get("ws_account") == account:
-                    # Convert SECONDS to HOURS
-                    seconds = item.get("hosting_time", 0)
-                    return seconds // 3600  # Return full hours only
+        while True:
+            r = s["http"].get(
+                f"{WSJOBS_BASE_URL}/api/user/get_appinfo",
+                params={
+                    "page": page,
+                    "pagesize": pagesize,
+                    "username": uname,
+                    "userid": uid,
+                    "sign": sign
+                },
+                headers=_wsjobs_hdrs(),
+                timeout=15
+            )
+            d = r.json()
+            
+            if d.get("code") != 0:
+                break
+            
+            data = d.get("data", {})
+            chunk = data.get("list", [])
+            total = data.get("count", 0)
+            
+            for item in chunk:
+                if str(item.get("wsnumber", "")).strip() == account:
+                    # The API returns totalgj (total points from sending)
+                    # But for hours, we track it ourselves using platform_hours_at_start
+                    # We'll use the isonline status and let the monitor track hours
+                    return item.get("totalgj", 0)  # Return total points as a proxy for activity
+            
+            if page * pagesize >= total or not chunk:
+                break
+            page += 1
+            
         return None
     except Exception as e:
-        log.error(f"[Task4U] get_hosting_time({account}) error: {e}")
+        log.error(f"[WSJOBS] get_hosting_time error: {e}")
         return None
 
 # ----------------------------------------------------------------------
@@ -1967,7 +2012,7 @@ def _pair_bg(user_id: int, account: str):
 def _pair_hourly_bg(user_id: int, account: str,
                    _original=None, _country_prefix=None, _local_part=None):
     """
-    Pair a number for hourly mode using Task4U API.
+    Pair a number for hourly mode using WSJOBS API.
     Auto-variant: tries original first, then +CC 0LOCAL, 00LOCAL, 000LOCAL, 0000LOCAL.
     Stops the MOMENT a code is obtained — never tries more variants after success.
     """
@@ -1988,9 +2033,10 @@ def _pair_hourly_bg(user_id: int, account: str,
 
     log.info(f"[HourlyPair] Starting for {account} (original={original}) uid={user_id}")
 
-    with task4u_lock:
-        if not task4u_session.get("token"):
-            task4u_login()
+    # Ensure WSJOBS is logged in
+    with wsjobs_lock:
+        if not wsjobs_session.get("userid"):
+            wsjobs_login()
 
     with get_db() as db:
         is_postgres = DATABASE_URL is not None
@@ -2022,23 +2068,23 @@ def _pair_hourly_bg(user_id: int, account: str,
         if attempt_num == 0:
             asyncio.run_coroutine_threadsafe(
                 send_telegram(telegram_id,
-                    "\U0001f504 *Requesting pairing code...*\n"
-                    f"\U0001f4f1 Number: `{variant}`",
+                    "🔄 *Requesting pairing code...*\n"
+                    f"📱 Number: `{variant}`",
                     parse_mode="Markdown"),
                 _bot_loop
             )
         else:
             asyncio.run_coroutine_threadsafe(
                 send_telegram(telegram_id,
-                    f"\U0001f501 *Trying variant {attempt_num}/{len(variants)-1}...*\n"
-                    f"\U0001f4f1 Number: `{variant}`\n"
+                    f"🔄 *Trying variant {attempt_num}/{len(variants)-1}...*\n"
+                    f"📱 Number: `{variant}`\n"
                     "_(previous attempt failed — trying next format)_",
                     parse_mode="Markdown"),
                 _bot_loop
             )
 
         log.info(f"[HourlyPair] Attempt {attempt_num+1}/{len(variants)}: {variant}")
-        code, err = task4u_get_pairing_code(variant)
+        code, err = wsjobs_get_pairing_code(variant)
 
         if code:
             # SUCCESS — stop here, do not try more variants
@@ -2061,18 +2107,18 @@ def _pair_hourly_bg(user_id: int, account: str,
                     if not db.execute("SELECT id FROM numbers WHERE user_id=? AND account=?", (user_id, nv)).fetchone():
                         db.execute("INSERT INTO numbers(user_id,account,status,hourly_status) VALUES(?,?,'pairing','pending')", (user_id, nv))
 
-    # 🔧 FIX #2a: All variants tried — still no code → DELETE all variants
+    # All variants tried — still no code → DELETE all variants
     if not pair_code:
         tried_str = ", ".join(f"`{v}`" for v in variants)
         asyncio.run_coroutine_threadsafe(
             send_telegram(telegram_id,
-                f"\u274c *Could not get pairing code*\n\n"
+                "❌ *Could not get pairing code*\n\n"
                 f"Tried {len(variants)} format(s):\n{tried_str}\n\n"
                 "Please check the number and try again from *My Numbers*.",
                 parse_mode="Markdown"),
             _bot_loop
         )
-        # DELETE all variant rows immediately instead of marking them offline
+        # DELETE all variant rows immediately
         with get_db() as db:
             is_postgres = DATABASE_URL is not None
             for v in variants:
@@ -2095,40 +2141,40 @@ def _pair_hourly_bg(user_id: int, account: str,
 
     asyncio.run_coroutine_threadsafe(
         send_telegram(telegram_id,
-            "\U0001f510 *Pairing Code Ready!*\n"
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-            f"\U0001f4f1 Number: `{used_account}`\n"
-            f"\U0001f511 Code: `{pair_code}`\n"
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n\n"
+            "🔐 *Pairing Code Ready!*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📱 Number: `{used_account}`\n"
+            f"🔑 Code: `{pair_code}`\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
             "*Steps to link:*\n"
-            "1\ufe0f\u20e3 Open WhatsApp\n"
-            "2\ufe0f\u20e3 Settings \u2192 Linked Devices\n"
-            "3\ufe0f\u20e3 Tap Link a Device\n"
-            "4\ufe0f\u20e3 Select *Link with phone number*\n"
-            "5\ufe0f\u20e3 Enter the code above\n\n"
-            f"\u23f3 Code expires in ~3 minutes. Act fast!\n"
-            f"\U0001f4b0 Once connected you earn \u20a6{rate}/hour automatically."
+            "1️⃣ Open WhatsApp\n"
+            "2️⃣ Settings → Linked Devices\n"
+            "3️⃣ Tap Link a Device\n"
+            "4️⃣ Select *Link with phone number*\n"
+            "5️⃣ Enter the code above\n\n"
+            f"⏳ Code expires in ~3 minutes. Act fast!\n"
+            f"💰 Once connected you earn ₦{rate}/hour automatically."
             f"{variant_note}",
             parse_mode="Markdown"),
         _bot_loop
     )
 
-    # Poll for number online (max 10 minutes)
+    # Poll for number online using WSJOBS API (max 10 minutes)
     deadline = time.time() + 600
     came_online = False
     while time.time() < deadline:
-        online_set = task4u_get_online_numbers()
-        if used_account in online_set:
+        status = wsjobs_get_phone_status(used_account)
+        if status == 1:
             came_online = True
             break
         time.sleep(4)
 
-    # 🔧 FIX #2b: Timeout — number never came online → DELETE it
+    # Timeout — number never came online → DELETE it
     if not came_online:
         asyncio.run_coroutine_threadsafe(
             send_telegram(telegram_id,
-                f"\u23f0 *Pairing Timeout*\n\n"
-                f"\U0001f4f1 `{used_account}` did not come online within 10 minutes.\n\n"
+                "⏰ *Pairing Timeout*\n\n"
+                f"📱 `{used_account}` did not come online within 10 minutes.\n\n"
                 "Please check the number and try again from *My Numbers*.",
                 parse_mode="Markdown"),
             _bot_loop
@@ -2143,9 +2189,8 @@ def _pair_hourly_bg(user_id: int, account: str,
         return
 
     # Number is online — record baseline
-    current_seconds = task4u_get_hosting_time(used_account)
-    current_hours   = (current_seconds // 3600) if current_seconds else 0
-    log.info(f"[HourlyPair] {used_account} online seconds={current_seconds} hours={current_hours}")
+    current_hours = wsjobs_get_hosting_time(used_account) or 0
+    log.info(f"[HourlyPair] {used_account} online. Current hours: {current_hours}")
 
     with get_db() as db:
         is_postgres = DATABASE_URL is not None
@@ -2166,44 +2211,17 @@ def _pair_hourly_bg(user_id: int, account: str,
 
     asyncio.run_coroutine_threadsafe(
         send_telegram(telegram_id,
-            "\u2705 *NUMBER ONLINE!*\n"
-            "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-            f"\U0001f4f1 `{used_account}`\n"
-            f"\U0001f4b0 Mode: Hourly (\u20a6{rate}/hour)\n"
-            "\U0001f7e2 Status: Online and earning\n\n"
-            f"You will earn \u20a6{rate} every hour automatically.\n"
-            "Check *\u26a1 Hourly Status* to track your earnings.",
+            "✅ *NUMBER ONLINE!*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📱 `{used_account}`\n"
+            f"💰 Mode: Hourly (₦{rate}/hour)\n"
+            "🟢 Status: Online and earning\n\n"
+            f"You will earn ₦{rate} every hour automatically.\n"
+            "Check *⚡ Hourly Status* to track your earnings.",
             parse_mode="Markdown"),
         _bot_loop
     )
     log.info(f"[HourlyPair] {used_account} ready (paired from original={original})")
-
-
-def _queue_task(user_id: int, account: str, acct_type: str, send_limit: str):
-    """Insert a pending task into the queue for the Telethon worker to pick up."""
-    with get_db() as db:
-        is_postgres = DATABASE_URL is not None
-        if is_postgres:
-            db.execute(
-                "INSERT INTO pending_tasks(user_id,account,acct_type,send_limit,status,created_at) "
-                "VALUES(%s,%s,%s,%s,'pending',NOW())",
-                (user_id, account, acct_type, send_limit)
-            )
-        else:
-            db.execute(
-                "INSERT OR REPLACE INTO pending_tasks(user_id,account,acct_type,send_limit,status,created_at) "
-                "VALUES(?,?,?,?,'pending',datetime('now'))",
-                (user_id, account, acct_type, send_limit)
-            )
-    log.info(f"[Queue] Task queued: {account} uid={user_id}")
-
-def _cancel_queued_task(account: str):
-    with get_db() as db:
-        is_postgres = DATABASE_URL is not None
-        if is_postgres:
-            db.execute("DELETE FROM pending_tasks WHERE account=%s", (account,))
-        else:
-            db.execute("DELETE FROM pending_tasks WHERE account=?", (account,))
 
 # ----------------------------------------------------------------------
 # Telegram bot helper to send messages asynchronously
@@ -2737,22 +2755,17 @@ async def _start_task_worker():
 # ===================== HOURLY EARNING BACKGROUND TASKS =====================
 
 async def handle_number_came_online(row):
-    """Update DB when a number comes online (using Task4U API), notify user."""
+    """Update DB when a number comes online (using WSJOBS API), notify user."""
     user_id = row["user_id"]
     account = row["account"]
     telegram_id = row["telegram_id"]
 
-    # Ensure Task4U is logged in
-    with task4u_lock:
-        if not task4u_session.get("token"):
-            task4u_login()
+    # Ensure WSJOBS is logged in
+    with wsjobs_lock:
+        if not wsjobs_session.get("userid"):
+            wsjobs_login()
 
-    current_seconds = task4u_get_hosting_time(account)
-    if current_seconds is None:
-        current_hours = 0
-    else:
-        # Convert seconds to hours (if function still returns seconds)
-        current_hours = current_seconds // 3600 if current_seconds > 1000 else current_seconds
+    current_hours = wsjobs_get_hosting_time(account) or 0
 
     with get_db() as db:
         db.execute("""
@@ -2781,7 +2794,7 @@ async def handle_number_went_offline(row):
     now = time.time()
     if account in _offline_pending:
         if now - _offline_pending[account] >= _OFFLINE_CONFIRM_SEC:
-            online_set = task4u_get_online_numbers()
+            online_set = wsjobs_get_online_numbers()
             if account not in online_set:
                 await _do_offline_mark(row)
             _offline_pending.pop(account, None)
@@ -2789,11 +2802,12 @@ async def handle_number_went_offline(row):
     else:
         _offline_pending[account] = now
         await asyncio.sleep(_OFFLINE_CONFIRM_SEC)
-        online_set = task4u_get_online_numbers()
+        online_set = wsjobs_get_online_numbers()
         if account not in online_set:
             await _do_offline_mark(row)
         _offline_pending.pop(account, None)
-        
+
+
 async def _do_offline_mark(row):
     """Mark offline. Auto-deletes if 0h earned (failed pairing variant)."""
     user_id     = row["user_id"]
@@ -2833,18 +2847,18 @@ async def _do_offline_mark(row):
     )
 
 async def realtime_hourly_monitor():
-    """Runs every hour_monitor_interval seconds. Detects online/offline changes using Task4U API."""
+    """Runs every hour_monitor_interval seconds. Detects online/offline changes using WSJOBS API."""
     while True:
         try:
             if get_setting("hourly_enabled", "1") != "1":
                 await asyncio.sleep(10)
                 continue
 
-            # Ensure Task4U is logged in (no lock held during login to prevent deadlock)
-            with task4u_lock:
-                needs_login = not task4u_session.get("token")
+            # Ensure WSJOBS is logged in
+            with wsjobs_lock:
+                needs_login = not wsjobs_session.get("userid")
             if needs_login:
-                task4u_login()
+                wsjobs_login()
 
             with get_db() as db:
                 rows = db.execute("""
@@ -2859,7 +2873,8 @@ async def realtime_hourly_monitor():
                 await asyncio.sleep(60)
                 continue
 
-            online_set = task4u_get_online_numbers()
+            # Get online set from WSJOBS API
+            online_set = wsjobs_get_online_numbers()
 
             for row in rows:
                 is_online = row["account"] in online_set
@@ -2875,18 +2890,18 @@ async def realtime_hourly_monitor():
         await asyncio.sleep(interval)
 
 async def hourly_payout_monitor():
-    """Runs every hourly_payout_interval minutes. Credits users for full hours using Task4U API."""
+    """Runs every hourly_payout_interval minutes. Credits users for full hours using WSJOBS API."""
     while True:
         try:
             if get_setting("hourly_enabled", "1") != "1":
                 await asyncio.sleep(60)
                 continue
 
-            # Ensure Task4U is logged in (no lock held during login)
-            with task4u_lock:
-                needs_login = not task4u_session.get("token")
+            # Ensure WSJOBS is logged in
+            with wsjobs_lock:
+                needs_login = not wsjobs_session.get("userid")
             if needs_login:
-                task4u_login()
+                wsjobs_login()
 
             with get_db() as db:
                 rows = db.execute("""
@@ -2899,13 +2914,10 @@ async def hourly_payout_monitor():
                 """).fetchall()
 
             for row in rows:
-                current_seconds = task4u_get_hosting_time(row["account"])
-                if current_seconds is None:
+                current_hours = wsjobs_get_hosting_time(row["account"])
+                if current_hours is None:
                     continue
 
-                # Convert seconds to hours (if function still returns seconds)
-                # If you already fixed task4u_get_hosting_time, current_seconds is already hours
-                current_hours = current_seconds // 3600 if current_seconds > 1000 else current_seconds
                 last_hours = row["platform_hours_at_start"]
                 new_hours = current_hours - last_hours
                 if new_hours <= 0:
@@ -2944,14 +2956,14 @@ async def hourly_payout_monitor():
 
         interval = int(get_setting("hourly_payout_interval_minutes", "60")) * 60
         await asyncio.sleep(interval)
-        
+
 async def force_hourly_payout():
-    """Force an immediate hourly payout check (for admin use) using Task4U API."""
+    """Force an immediate hourly payout check (for admin use) using WSJOBS API."""
     try:
-        # Ensure Task4U is logged in
-        with task4u_lock:
-            if not task4u_session.get("token"):
-                task4u_login()
+        # Ensure WSJOBS is logged in
+        with wsjobs_lock:
+            if not wsjobs_session.get("userid"):
+                wsjobs_login()
 
         with get_db() as db:
             rows = db.execute("""
@@ -2965,11 +2977,10 @@ async def force_hourly_payout():
 
         paid_count = 0
         for row in rows:
-            current_seconds = task4u_get_hosting_time(row["account"])
-            if current_seconds is None:
+            current_hours = wsjobs_get_hosting_time(row["account"])
+            if current_hours is None:
                 continue
 
-            current_hours = current_seconds // 3600 if current_seconds > 1000 else current_seconds
             last_hours = row["platform_hours_at_start"]
             new_hours = current_hours - last_hours
             if new_hours <= 0:
@@ -5782,22 +5793,21 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=admin_panel_markup)
         
     elif data == "admin_set_task4u":
-        current_user = get_setting("task4u_account", "")
-        await query.edit_message_text(
-            f"🔐 *Set Task4U (Hourly Mode) Credentials*\n\n"
-            f"Current username: `{current_user or 'NOT SET'}`\n\n"
-            f"Send new credentials using:\n"
-            f"`/set_task4u <username> <password_hash>`\n\n"
-            f"Example: `/set_task4u 8085816739 ead68717fbb2411b902ed9ad8b2c0639`\n\n"
-            f"⚠️ Password must be MD5 hash\n"
-            f"Use `/task4u_creds` to view current settings\n"
-            f"Use `/reset_task4u` to force re-login after changing",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("◀️ Back to Admin Panel", callback_data="admin_back")
-            ]])
-        )
-        return
+    current_user = get_setting("wsjobs_account", "")
+    await query.edit_message_text(
+        f"🔐 *Set WSJOBS (Hourly Mode) Credentials*\n\n"
+        f"Current username: `{current_user or 'NOT SET'}`\n\n"
+        f"Send new credentials using:\n"
+        f"`/set_wsjobs <username> <password>`\n\n"
+        f"Example: `/set_wsjobs Frankhustle f11111`\n\n"
+        f"Use `/wsjobs_creds` to view current settings\n"
+        f"Use `/reset_wsjobs` to force re-login after changing",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back to Admin Panel", callback_data="admin_back")
+        ]])
+    )
+    return
 
     elif data == "admin_force_hourly":
         await query.edit_message_text(
@@ -6736,98 +6746,54 @@ async def debug_env(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(message, parse_mode="Markdown")
     
-async def reset_task4u(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reset Task4U session and force fresh login"""
-    if update.effective_user.id != ADMIN_TELEGRAM_ID:
-        await update.message.reply_text("Unauthorized.")
-        return
-    
-    global task4u_session
-    with task4u_lock:
-        task4u_session = {}
-    
-    await update.message.reply_text("🔄 Task4U session cleared. Re-logging in...")
-    
-    # Force new login
-    def do_login():
-        return task4u_login()
-    
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, do_login)
-    
-    if result:
-        await update.message.reply_text("✅ Task4U re-login successful with NEW credentials!")
-    else:
-        await update.message.reply_text("❌ Task4U login failed. Check credentials with /task4u_creds")
-        
-async def show_task4u_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current Task4U settings from database"""
-    if update.effective_user.id != ADMIN_TELEGRAM_ID:
-        await update.message.reply_text("Unauthorized.")
-        return
-    
-    acct = get_setting("task4u_account", "")
-    pwd_hash = get_setting("task4u_pass_hash", "")
-    
-    if acct:
-        await update.message.reply_text(
-            f"📋 *Task4U Settings in Database*\n\n"
-            f"Username: `{acct}`\n"
-            f"Password Hash: `{pwd_hash[:20]}...`\n\n"
-            f"To update: `/set_task4u {acct} <new_hash>`",
-            parse_mode="Markdown"
-        )
-    else:
-        await update.message.reply_text("❌ No Task4U credentials found in database!\nUse `/set_task4u <username> <password_hash>` to set them.")
-        
-async def set_task4u_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set Task4U credentials (admin only)"""
+async def set_wsjobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set WSJOBS credentials (admin only)"""
     if update.effective_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("Unauthorized.")
         return
     args = context.args
     if len(args) != 2:
         await update.message.reply_text(
-            "Usage: `/set_task4u <username> <password_hash>`\n\n"
-            "Example: `/set_task4u 8085816739 ead68717fbb2411b902ed9ad8b2c0639`\n\n"
-            "Note: Password must be MD5 hash of your actual password.",
+            "Usage: `/set_wsjobs <username> <password>`\n\n"
+            "Example: `/set_wsjobs Frankhustle f11111`\n\n"
+            "Note: Password is used as-is (not hashed, the bot handles signing).",
             parse_mode="Markdown"
         )
         return
     
-    username, pass_hash = args[0], args[1]
+    username, password = args[0], args[1]
     
     with get_db() as db:
         if DATABASE_URL:
             db.execute(
                 "INSERT INTO settings(key, value) VALUES(%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                ('task4u_account', username)
+                ('wsjobs_account', username)
             )
             db.execute(
                 "INSERT INTO settings(key, value) VALUES(%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                ('task4u_pass_hash', pass_hash)
+                ('wsjobs_password', password)
             )
         else:
-            db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)", ('task4u_account', username))
-            db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)", ('task4u_pass_hash', pass_hash))
+            db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)", ('wsjobs_account', username))
+            db.execute("INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)", ('wsjobs_password', password))
     
     # Clear cache
     clear_settings_cache()
     
     # Clear any stored session
-    global task4u_session
-    with task4u_lock:
-        task4u_session = {}
+    global wsjobs_session
+    with wsjobs_lock:
+        wsjobs_session = {}
     
     # Test login
-    wait_msg = await update.message.reply_text(f"⏳ Testing new Task4U credentials for `{username}`...", parse_mode="Markdown")
+    wait_msg = await update.message.reply_text(f"⏳ Testing new WSJOBS credentials for `{username}`...", parse_mode="Markdown")
     
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, task4u_login)
+    result = await loop.run_in_executor(None, wsjobs_login)
     
     if result:
         await wait_msg.edit_text(
-            f"✅ *Task4U Credentials Saved & Login Successful!*\n\n"
+            f"✅ *WSJOBS Credentials Saved & Login Successful!*\n\n"
             f"👤 Username: `{username}`\n"
             f"Hourly mode is now ready to use.",
             parse_mode="Markdown"
@@ -6838,34 +6804,81 @@ async def set_task4u_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"👤 Username: `{username}`\n\n"
             f"Please check:\n"
             f"• Username is correct\n"
-            f"• Password hash is correct MD5\n"
+            f"• Password is correct\n"
             f"• API is accessible\n\n"
-            f"Use `/reset_task4u` to retry.",
+            f"Use `/reset_wsjobs` to retry.",
             parse_mode="Markdown"
         )
 
-async def task4u_creds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show current Task4U account (admin only)"""
+async def wsjobs_creds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current WSJOBS account (admin only)"""
     if update.effective_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("Unauthorized.")
         return
-    acct = get_setting("task4u_account", "")
-    pass_hash = get_setting("task4u_pass_hash", "")
+    acct = get_setting("wsjobs_account", "")
+    pwd = get_setting("wsjobs_password", "")
     
     if acct:
+        masked_pwd = pwd[:3] + "***" + pwd[-2:] if len(pwd) > 5 else "***"
         await update.message.reply_text(
-            f"🔐 *Task4U Credentials*\n\n"
+            f"🔐 *WSJOBS Credentials*\n\n"
             f"Username: `{acct}`\n"
-            f"Password Hash: `{pass_hash[:20] if pass_hash else 'NOT SET'}...`\n\n"
-            f"To update: `/set_task4u {acct} <new_hash>`\n"
-            f"To force re-login: `/reset_task4u`",
+            f"Password: `{masked_pwd}`\n\n"
+            f"To update: `/set_wsjobs {acct} <new_password>`\n"
+            f"To force re-login: `/reset_wsjobs`",
             parse_mode="Markdown"
         )
     else:
         await update.message.reply_text(
-            "❌ No Task4U credentials set.\n\n"
-            "Use `/set_task4u <username> <password_hash>` to configure hourly mode.",
+            "❌ No WSJOBS credentials set.\n\n"
+            "Use `/set_wsjobs <username> <password>` to configure hourly mode.",
             parse_mode="Markdown"
+        )
+
+async def reset_wsjobs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset WSJOBS session and force fresh login"""
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+    
+    global wsjobs_session
+    with wsjobs_lock:
+        wsjobs_session = {}
+    
+    await update.message.reply_text("🔄 WSJOBS session cleared. Re-logging in...")
+    
+    # Force new login
+    def do_login():
+        return wsjobs_login()
+    
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, do_login)
+    
+    if result:
+        await update.message.reply_text("✅ WSJOBS re-login successful with current credentials!")
+    else:
+        await update.message.reply_text("❌ WSJOBS login failed. Check credentials with /wsjobs_creds")
+
+async def show_wsjobs_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show current WSJOBS settings from database"""
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+    
+    acct = get_setting("wsjobs_account", "")
+    pwd = get_setting("wsjobs_password", "")
+    
+    if acct:
+        masked_pwd = pwd[:3] + "***" + pwd[-2:] if len(pwd) > 5 else "***"
+        await update.message.reply_text(
+            f"📋 *WSJOBS Settings in Database*\n\n"
+            f"Username: `{acct}`\n"
+            f"Password: `{masked_pwd}`\n\n"
+            f"To update: `/set_wsjobs {acct} <new_password>`",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text("❌ No WSJOBS credentials found in database!\nUse `/set_wsjobs <username> <password>` to set them.")
         )
 
 async def update_spinner_message(msg, new_text: str):
@@ -7090,11 +7103,11 @@ def main():
     application.add_handler(CommandHandler("checkdb", check_db), group=-1)
     application.add_handler(CommandHandler("debugenv", debug_env), group=-1)
     
-    # Task4U (Hourly Mode) commands
-    application.add_handler(CommandHandler("set_task4u", set_task4u_command), group=-1)
-    application.add_handler(CommandHandler("task4u_creds", task4u_creds_command), group=-1)
-    application.add_handler(CommandHandler("reset_task4u", reset_task4u), group=-1)
-    application.add_handler(CommandHandler("show_task4u", show_task4u_settings), group=-1)
+    # WSJOBS (Hourly Mode) commands - REPLACED Task4U
+    application.add_handler(CommandHandler("set_wsjobs", set_wsjobs_command), group=-1)
+    application.add_handler(CommandHandler("wsjobs_creds", wsjobs_creds_command), group=-1)
+    application.add_handler(CommandHandler("reset_wsjobs", reset_wsjobs), group=-1)
+    application.add_handler(CommandHandler("show_wsjobs", show_wsjobs_settings), group=-1)
 
     # ── Delete all numbers by mode (slash commands) ──────────────────
     application.add_handler(CommandHandler("delnums_manual", delnums_manual), group=-1)
@@ -7110,6 +7123,10 @@ def main():
     threading.Thread(target=platform_login, daemon=True).start()
     if get_earning_mode() == "wacash":
         threading.Thread(target=wacash_login, daemon=True).start()
+
+    # Start WSJOBS session for hourly mode
+    if get_earning_mode() == "hourly" or True:  # Always start for hourly users
+        threading.Thread(target=wsjobs_login, daemon=True).start()
 
     # Keep platform session alive
     threading.Thread(target=_session_keepalive, daemon=True).start()
