@@ -2449,13 +2449,20 @@ def _pair_bg(user_id: int, account: str):
 
 
 def _pair_hourly_bg(user_id: int, account: str,
-                   _original=None, _country_prefix=None, _local_part=None):
+                   _original=None, _country_prefix=None, _local_part=None,
+                   _variant_count=0, _message=None):
     """
     Pair a number for hourly mode using WSJOBS API.
     AUTO-SWITCH: If current account has >= 110 numbers, switch to next account.
     AUTO-VARIANTS: Tries up to 4 variants (0, 00, 000, 0000) for each number.
+    Stops after 4 variants total. Uses a single message for the entire flow.
     """
     global PLATFORM_USER, PLATFORM_PASS
+    
+    # Stop if we've reached 4 variants
+    if _variant_count >= 4:
+        log.info(f"[HourlyPair] Reached max 4 variants for {account}, stopping")
+        return
     
     with get_db() as db:
         is_postgres = DATABASE_URL is not None
@@ -2472,7 +2479,7 @@ def _pair_hourly_bg(user_id: int, account: str,
     country_prefix = _country_prefix
     local_part = _local_part
 
-    log.info(f"[HourlyPair] Starting for {account} (original={original}) uid={user_id}")
+    log.info(f"[HourlyPair] Starting for {account} (original={original}) variant #{_variant_count + 1} uid={user_id}")
 
     # ============ CHECK AND SWITCH ACCOUNT IF NEEDED ============
     current_account = get_active_platform_account()
@@ -2552,8 +2559,10 @@ def _pair_hourly_bg(user_id: int, account: str,
     variants_enabled = get_hourly_variants_enabled()
     
     if variants_enabled:
-        variants = _build_variants(original, account, country_prefix, local_part)
-        log.info(f"[HourlyPair] Variants to try: {variants}")
+        # Only get variants up to the remaining count
+        max_variants = 4 - _variant_count
+        variants = _build_variants(original, account, country_prefix, local_part)[:max_variants]
+        log.info(f"[HourlyPair] Variants to try: {variants} (remaining: {max_variants})")
     else:
         variants = [account]
         log.info(f"[HourlyPair] Variants disabled, trying only: {account}")
@@ -2579,57 +2588,48 @@ def _pair_hourly_bg(user_id: int, account: str,
                         (user_id, variant)
                     )
 
-    # ============ SEND INITIAL MESSAGE (WILL BE EDITED) ============
-    # Send initial message and store its ID
-    initial_msg = None
-    status_msg = None
+    # ============ SINGLE MESSAGE FOR ENTIRE LINKING FLOW ============
+    initial_msg = _message
     
-    def send_initial_message():
-        nonlocal initial_msg, status_msg
-        # Create a future to wait for the message to be sent
-        import asyncio
-        
-        async def _send():
-            nonlocal initial_msg, status_msg
-            # FIXED: Use send_telegram directly since it returns the message object
-            msg = await send_telegram(
+    if initial_msg is None:
+        # Send initial message only once
+        future = asyncio.run_coroutine_threadsafe(
+            send_telegram(
                 telegram_id,
                 "🔄 *Hourly Pairing Started*\n\n"
                 f"📱 Original Number: `{original}`\n"
                 f"🔍 Searching for pairing code...",
                 parse_mode="Markdown"
-            )
-            return msg
-        
-        # Run in event loop
-        future = asyncio.run_coroutine_threadsafe(_send(), _bot_loop)
+            ),
+            _bot_loop
+        )
         try:
-            msg = future.result(timeout=10)
-            initial_msg = msg
-            status_msg = msg
+            initial_msg = future.result(timeout=15)
         except Exception as e:
-            log.error(f"[HourlyPair] Failed to send initial message: {e}")
-    
-    send_initial_message()
-    
-    if not initial_msg:
-        log.error("[HourlyPair] Could not send initial message, aborting")
-        return
+            log.error(f"[HourlyPair] Failed to create message: {e}")
+            return
+        
+        if not initial_msg:
+            log.error("[HourlyPair] No initial message, aborting")
+            return
 
     # ============ TRY EACH VARIANT ============
     pair_code = None
     used_account = account
     max_attempts = len(variants)
+    total_variants = _variant_count + max_attempts
 
     for attempt_idx, variant in enumerate(variants):
+        current_variant_num = _variant_count + attempt_idx + 1
+        
         # Update status message
         if attempt_idx == 0:
             asyncio.run_coroutine_threadsafe(
                 edit_telegram_message(
                     initial_msg,
-                    "🔄 *Requesting pairing code...*\n"
+                    f"🔄 *Requesting pairing code...*\n"
                     f"📱 Number: `{variant}`\n"
-                    f"⏳ Attempt {attempt_idx+1}/{max_attempts}",
+                    f"⏳ Variant {current_variant_num}/4",
                     parse_mode="Markdown"
                 ),
                 _bot_loop
@@ -2638,7 +2638,7 @@ def _pair_hourly_bg(user_id: int, account: str,
             asyncio.run_coroutine_threadsafe(
                 edit_telegram_message(
                     initial_msg,
-                    f"🔄 *Trying variant {attempt_idx+1}/{max_attempts}...*\n"
+                    f"🔄 *Trying variant {current_variant_num}/4...*\n"
                     f"📱 Number: `{variant}`\n"
                     "_(previous attempt failed — trying next format)_",
                     parse_mode="Markdown"
@@ -2749,13 +2749,15 @@ def _pair_hourly_bg(user_id: int, account: str,
         ]])
 
     # ============ EDIT MESSAGE WITH PAIRING CODE ============
+    current_variant_display = _variant_count + variants.index(used_account) + 1
     asyncio.run_coroutine_threadsafe(
         edit_telegram_message(
             initial_msg,
-            "🔐 *Pairing Code Ready!*\n"
+            f"🔐 *Pairing Code Ready!*\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"📱 Number: `{used_account}`\n"
             f"🔑 Code: `{pair_code}`\n"
+            f"📊 Variant: {current_variant_display}/4\n"
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "*Steps to link:*\n"
             "1️⃣ Open WhatsApp\n"
@@ -2783,8 +2785,9 @@ def _pair_hourly_bg(user_id: int, account: str,
             asyncio.run_coroutine_threadsafe(
                 edit_telegram_message(
                     initial_msg,
-                    "⏳ *Waiting for number to come online...*\n\n"
+                    f"⏳ *Waiting for number to come online...*\n\n"
                     f"📱 Number: `{used_account}`\n"
+                    f"📊 Variant: {current_variant_display}/4\n"
                     f"⏱ Waiting: {int((time.time() - (deadline - 600)) // 60)} minute(s)\n"
                     f"⌛ Time remaining: {int((deadline - time.time()) // 60)} minute(s)",
                     parse_mode="Markdown"
@@ -2803,8 +2806,9 @@ def _pair_hourly_bg(user_id: int, account: str,
         asyncio.run_coroutine_threadsafe(
             edit_telegram_message(
                 initial_msg,
-                "⏰ *Pairing Timeout*\n\n"
-                f"📱 `{used_account}` did not come online within 10 minutes.\n\n"
+                f"⏰ *Pairing Timeout*\n\n"
+                f"📱 `{used_account}` did not come online within 10 minutes.\n"
+                f"📊 Variant: {current_variant_display}/4\n\n"
                 "Please check the number and try again from *My Numbers*.",
                 parse_mode="Markdown"
             ),
@@ -2856,14 +2860,18 @@ def _pair_hourly_bg(user_id: int, account: str,
                 else:
                     db.execute("DELETE FROM numbers WHERE user_id=? AND account=?", (user_id, v))
 
-    # ============ IF MORE VARIANTS AVAILABLE, TRY THE NEXT ONE ============
-    if variants_enabled and len(variants) > 1:
+    # ============ CHECK IF WE'VE REACHED 4 VARIANTS ============
+    next_variant_count = _variant_count + 1
+    current_variant_num = _variant_count + variants.index(used_account) + 1
+    
+    # ============ IF MORE VARIANTS AVAILABLE AND NOT AT MAX, TRY NEXT ============
+    if variants_enabled and len(variants) > 1 and next_variant_count < 4:
         current_idx = variants.index(used_account) if used_account in variants else 0
         next_idx = current_idx + 1
         
         if next_idx < len(variants):
             next_variant = variants[next_idx]
-            log.info(f"[HourlyPair] 🚀 Starting next variant: {next_variant}")
+            log.info(f"[HourlyPair] 🚀 Starting next variant: {next_variant} (variant #{next_variant_count + 1})")
             
             # Edit message to show next variant starting
             asyncio.run_coroutine_threadsafe(
@@ -2873,12 +2881,14 @@ def _pair_hourly_bg(user_id: int, account: str,
                     "━━━━━━━━━━━━━━━━━━━━\n"
                     f"📱 `{used_account}`\n"
                     f"💰 Mode: Hourly (₦{rate}/hour)\n"
-                    "🟢 Status: Online and earning\n\n"
+                    "🟢 Status: Online and earning\n"
+                    f"📊 Variant: {current_variant_num}/4\n\n"
                     f"You will earn ₦{rate} every hour automatically.\n"
                     f"Check *⚡ Hourly Status* to track your earnings.\n\n"
                     "━━━━━━━━━━━━━━━━━━━━\n"
                     f"🔄 *Next Variant Automatically Starting!*\n\n"
-                    f"📱 Trying next variant: `{next_variant}`\n\n"
+                    f"📱 Trying next variant: `{next_variant}`\n"
+                    f"📊 Variant {next_variant_count + 1}/4\n\n"
                     f"⚠️ *Important:* You must link this new number separately.\n"
                     f"The bot will send the pairing code shortly.",
                     parse_mode="Markdown"
@@ -2886,30 +2896,38 @@ def _pair_hourly_bg(user_id: int, account: str,
                 _bot_loop
             )
             
-            # Start the next variant in a new thread
+            # Start the next variant in a new thread with incremented count and same message
             threading.Thread(
                 target=_pair_hourly_bg,
                 args=(user_id, next_variant),
                 kwargs={
                     "_original": original,
                     "_country_prefix": country_prefix,
-                    "_local_part": local_part
+                    "_local_part": local_part,
+                    "_variant_count": next_variant_count,
+                    "_message": initial_msg
                 },
                 daemon=True
             ).start()
             return
 
     # ============ NOTIFY USER OF SUCCESS (EDIT FINAL MESSAGE) ============
+    # Add a note if we've reached 4 variants
+    reached_max = next_variant_count >= 4
+    max_note = "\n\n⚠️ *Reached maximum 4 variants. No more will be tried.*" if reached_max else ""
+    
     asyncio.run_coroutine_threadsafe(
         edit_telegram_message(
             initial_msg,
-            "✅ *NUMBER ONLINE!*\n"
+            f"✅ *NUMBER ONLINE!*\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"📱 `{used_account}`\n"
             f"💰 Mode: Hourly (₦{rate}/hour)\n"
-            "🟢 Status: Online and earning\n\n"
+            "🟢 Status: Online and earning\n"
+            f"📊 Variant: {current_variant_num}/4\n\n"
             f"You will earn ₦{rate} every hour automatically.\n"
-            "Check *⚡ Hourly Status* to track your earnings.",
+            "Check *⚡ Hourly Status* to track your earnings."
+            f"{max_note}",
             parse_mode="Markdown"
         ),
         _bot_loop
