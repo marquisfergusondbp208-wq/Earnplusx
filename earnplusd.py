@@ -618,12 +618,20 @@ def _increment_daily_msgs(db, user_id: int, count: int = 1):
         )
 
 def init_db():
-    with get_db() as db:
-        is_postgres = DATABASE_URL is not None
+    # We need a fresh connection for initialization to handle transactions properly
+    if DATABASE_URL:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
         
-        if is_postgres:
-            # PostgreSQL syntax with BIGINT for Telegram IDs
-            db.execute("""
+        conn = None
+        try:
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+            conn.autocommit = True  # <-- KEY FIX: Enable autocommit mode
+            cur = conn.cursor()
+            
+            # ============ CREATE ALL TABLES ============
+            # Users table
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS users(
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE,
@@ -639,7 +647,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS auth_tokens(
                     token TEXT PRIMARY KEY,
                     user_id BIGINT NOT NULL,
@@ -647,7 +655,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS numbers(
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER,
@@ -667,19 +675,15 @@ def init_db():
                 )
             """)
             
-            # Add offline_hours_processed column for existing tables (if upgrading)
+            # Try to add column - with autocommit=True this won't rollback
             try:
-                db.execute("ALTER TABLE numbers ADD COLUMN offline_hours_processed INTEGER DEFAULT 0")
+                cur.execute("ALTER TABLE numbers ADD COLUMN offline_hours_processed INTEGER DEFAULT 0")
+                conn.commit()
             except Exception as e:
                 log.info(f"Column offline_hours_processed may already exist: {e}")
-                # For PostgreSQL, commit to clear the failed transaction state
-                if DATABASE_URL:
-                    try:
-                        db._conn.commit()
-                    except:
-                        pass
+                conn.commit()  # Commit to clear any failed state
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS auto_numbers(
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -694,7 +698,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS pending_tasks(
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -706,7 +710,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS bank_details(
                     user_id INTEGER PRIMARY KEY,
                     account_num TEXT,
@@ -715,14 +719,14 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS trx_wallets(
                     user_id INTEGER PRIMARY KEY,
                     wallet_address TEXT
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS withdrawals(
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER,
@@ -742,7 +746,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS transactions(
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER,
@@ -753,14 +757,14 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS settings(
                     key TEXT PRIMARY KEY,
                     value TEXT
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS wacash_numbers(
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -775,7 +779,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS claim_codes(
                     id SERIAL PRIMARY KEY,
                     code TEXT UNIQUE NOT NULL,
@@ -787,7 +791,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS notifications(
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER,
@@ -799,7 +803,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS admin_logs(
                     id SERIAL PRIMARY KEY,
                     admin_id BIGINT NOT NULL,
@@ -810,7 +814,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS daily_msgs(
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -820,7 +824,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS check_ins(
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -831,7 +835,7 @@ def init_db():
                 )
             """)
             
-            db.execute("""
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS login_attempts(
                     id SERIAL PRIMARY KEY,
                     username TEXT NOT NULL,
@@ -840,8 +844,8 @@ def init_db():
                 )
             """)
             
-            # ============ NEW: PLATFORM ACCOUNTS TABLE (POSTGRESQL) ============
-            db.execute("""
+            # ============ PLATFORM ACCOUNTS TABLE ============
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS platform_accounts(
                     id SERIAL PRIMARY KEY,
                     username TEXT NOT NULL UNIQUE,
@@ -854,13 +858,13 @@ def init_db():
                     updated_at TIMESTAMP DEFAULT NOW()
                 )
             """)
-            db.execute("CREATE INDEX IF NOT EXISTS idx_platform_accounts_active ON platform_accounts(is_active)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_platform_accounts_hourly_count ON platform_accounts(hourly_numbers_count)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_platform_accounts_active ON platform_accounts(is_active)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_platform_accounts_hourly_count ON platform_accounts(hourly_numbers_count)")
             
-            db.execute("CREATE INDEX IF NOT EXISTS idx_daily_msgs_date ON daily_msgs(date)")
-            db.execute("CREATE INDEX IF NOT EXISTS idx_daily_msgs_uid ON daily_msgs(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_msgs_date ON daily_msgs(date)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_msgs_uid ON daily_msgs(user_id)")
             
-            # Insert settings (PostgreSQL syntax)
+            # ============ INSERT SETTINGS ============
             settings_data = [
                 ('naira_per_msg', '30.0'),
                 ('points_per_msg', '200'),
@@ -888,20 +892,36 @@ def init_db():
             ]
             
             for key, value in settings_data:
-                db.execute("INSERT INTO settings(key, value) VALUES(%s, %s) ON CONFLICT (key) DO NOTHING", (key, value))
+                cur.execute(
+                    "INSERT INTO settings(key, value) VALUES(%s, %s) ON CONFLICT (key) DO NOTHING",
+                    (key, value)
+                )
             
-            # Create default admin user - NOW the users table exists!
-            admin = db.execute("SELECT id FROM users WHERE telegram_id = %s", (ADMIN_TELEGRAM_ID,)).fetchone()
+            # ============ CREATE DEFAULT ADMIN USER ============
+            cur.execute("SELECT id FROM users WHERE telegram_id = %s", (ADMIN_TELEGRAM_ID,))
+            admin = cur.fetchone()
             if not admin:
                 ref = secrets.token_hex(4).upper()
-                db.execute(
+                cur.execute(
                     "INSERT INTO users(telegram_id, username, password, is_admin, referral_code) VALUES(%s, %s, %s, 1, %s)",
                     (ADMIN_TELEGRAM_ID, "admin", _hash_pw("admin123"), ref)
                 )
                 log.info("Admin user created (telegram_id=%s)", ADMIN_TELEGRAM_ID)
-                
-        else:
-            # Original SQLite code - keep as is
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+            log.info("PostgreSQL database initialized successfully")
+            
+        except Exception as e:
+            if conn:
+                conn.close()
+            log.error(f"PostgreSQL initialization error: {e}")
+            raise
+            
+    else:
+        # SQLite path - keep your existing SQLite code
+        with get_db() as db:
             db.executescript("""
             CREATE TABLE IF NOT EXISTS users(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
