@@ -1077,47 +1077,110 @@ def init_db():
                 
 # ============ MULTI-ACCOUNT MANAGEMENT FUNCTIONS ============
 
-def add_platform_account(username: str, password: str, label: str = None) -> bool:
-    """Add a new platform account to the system."""
+def add_platform_account(username: str, password: str, label: str = None) -> tuple[bool, dict | None]:
+    """
+    Add a new platform account to the system and test login.
+    Returns: (success, account_info_with_counts)
+    """
     try:
-        with get_db() as db:
-            is_postgres = DATABASE_URL is not None
+        # First, test login with the credentials
+        http = requests.Session()
+        pm = _md5(_md5(password))
+        sign = _md5(_md5("/api/user/login") + username + pm)
+        
+        try:
+            r = http.post(
+                f"{BASE_URL}/api/user/login",
+                json={"username": username, "userpwd": pm, "sign": sign},
+                headers=_hdrs(),
+                timeout=15
+            )
+            d = r.json()
             
-            # Check if account already exists
-            if is_postgres:
-                existing = db.execute("SELECT id FROM platform_accounts WHERE username=%s", (username,)).fetchone()
-            else:
-                existing = db.execute("SELECT id FROM platform_accounts WHERE username=?", (username,)).fetchone()
+            if d.get("code") != 0:
+                log.error(f"[AddAccount] Login failed for {username}: {d.get('message')}")
+                return False, {"error": d.get('message', 'Login failed')}
             
-            if existing:
-                # Update password if account exists
+            # Login successful - get user info
+            info = d["data"]["info"]
+            userid = info["id"]
+            
+            # Now get online numbers count
+            online_count = 0
+            total_count = 0
+            try:
+                # Use the session to get app info
+                sign2 = _s0("/api/user/get_appinfo", str(userid), username)
+                r2 = http.get(
+                    f"{BASE_URL}/api/user/get_appinfo",
+                    params={"page": 1, "pagesize": 50, "username": username, "userid": userid, "sign": sign2},
+                    headers=_hdrs(),
+                    timeout=15
+                )
+                d2 = r2.json()
+                if d2.get("code") == 0:
+                    chunk = d2["data"].get("list", [])
+                    total_count = len(chunk)
+                    for item in chunk:
+                        if item.get("status") == 1:  # 1 = online
+                            online_count += 1
+            except Exception as e:
+                log.warning(f"[AddAccount] Could not get numbers count: {e}")
+            
+            # Now save to database
+            with get_db() as db:
+                is_postgres = DATABASE_URL is not None
+                
+                # Check if account already exists
                 if is_postgres:
-                    db.execute(
-                        "UPDATE platform_accounts SET password=%s, label=%s, updated_at=CURRENT_TIMESTAMP WHERE username=%s",
-                        (password, label, username)
-                    )
+                    existing = db.execute("SELECT id FROM platform_accounts WHERE username=%s", (username,)).fetchone()
                 else:
-                    db.execute(
-                        "UPDATE platform_accounts SET password=?, label=?, updated_at=datetime('now') WHERE username=?",
-                        (password, label, username)
-                    )
-                return True
+                    existing = db.execute("SELECT id FROM platform_accounts WHERE username=?", (username,)).fetchone()
+                
+                if existing:
+                    # Update existing account
+                    if is_postgres:
+                        db.execute(
+                            "UPDATE platform_accounts SET password=%s, label=%s, numbers_count=%s, updated_at=CURRENT_TIMESTAMP WHERE username=%s",
+                            (password, label, total_count, username)
+                        )
+                    else:
+                        db.execute(
+                            "UPDATE platform_accounts SET password=?, label=?, numbers_count=?, updated_at=datetime('now') WHERE username=?",
+                            (password, label, total_count, username)
+                        )
+                else:
+                    # Insert new account
+                    if is_postgres:
+                        db.execute(
+                            "INSERT INTO platform_accounts(username, password, label, numbers_count) VALUES(%s, %s, %s, %s)",
+                            (username, password, label, total_count)
+                        )
+                    else:
+                        db.execute(
+                            "INSERT INTO platform_accounts(username, password, label, numbers_count) VALUES(?, ?, ?, ?)",
+                            (username, password, label, total_count)
+                        )
             
-            # Insert new account
-            if is_postgres:
-                db.execute(
-                    "INSERT INTO platform_accounts(username, password, label) VALUES(%s, %s, %s)",
-                    (username, password, label)
-                )
-            else:
-                db.execute(
-                    "INSERT INTO platform_accounts(username, password, label) VALUES(?, ?, ?)",
-                    (username, password, label)
-                )
-            return True
+            # Return success with account info
+            return True, {
+                "username": username,
+                "userid": userid,
+                "total_numbers": total_count,
+                "online_numbers": online_count,
+                "label": label
+            }
+            
+        except requests.exceptions.Timeout:
+            log.error(f"[AddAccount] Timeout logging in to {username}")
+            return False, {"error": "Connection timeout"}
+        except Exception as e:
+            log.error(f"[AddAccount] Login error for {username}: {e}")
+            return False, {"error": str(e)}
+            
     except Exception as e:
-        log.error(f"Error adding platform account: {e}")
-        return False
+        log.error(f"[AddAccount] Error adding platform account: {e}")
+        return False, {"error": str(e)}
 
 
 def get_active_platform_account() -> dict | None:
@@ -1200,6 +1263,89 @@ def update_account_numbers_count(username: str, hourly_count: int = None, total_
                     )
     except Exception as e:
         log.error(f"Error updating account counts: {e}")
+        
+def test_platform_account(username: str) -> tuple[bool, dict | None]:
+    """
+    Test login for an existing platform account and get current counts.
+    Returns: (success, account_info_with_counts)
+    """
+    with get_db() as db:
+        is_postgres = DATABASE_URL is not None
+        if is_postgres:
+            acc = db.execute("SELECT username, password FROM platform_accounts WHERE username=%s", (username,)).fetchone()
+        else:
+            acc = db.execute("SELECT username, password FROM platform_accounts WHERE username=?", (username,)).fetchone()
+        
+        if not acc:
+            return False, {"error": "Account not found"}
+        
+        password = acc["password"]
+    
+    # Test login
+    http = requests.Session()
+    pm = _md5(_md5(password))
+    sign = _md5(_md5("/api/user/login") + username + pm)
+    
+    try:
+        r = http.post(
+            f"{BASE_URL}/api/user/login",
+            json={"username": username, "userpwd": pm, "sign": sign},
+            headers=_hdrs(),
+            timeout=15
+        )
+        d = r.json()
+        
+        if d.get("code") != 0:
+            return False, {"error": d.get('message', 'Login failed')}
+        
+        info = d["data"]["info"]
+        userid = info["id"]
+        
+        # Get online numbers count
+        online_count = 0
+        total_count = 0
+        try:
+            sign2 = _s0("/api/user/get_appinfo", str(userid), username)
+            r2 = http.get(
+                f"{BASE_URL}/api/user/get_appinfo",
+                params={"page": 1, "pagesize": 50, "username": username, "userid": userid, "sign": sign2},
+                headers=_hdrs(),
+                timeout=15
+            )
+            d2 = r2.json()
+            if d2.get("code") == 0:
+                chunk = d2["data"].get("list", [])
+                total_count = len(chunk)
+                for item in chunk:
+                    if item.get("status") == 1:
+                        online_count += 1
+        except Exception as e:
+            log.warning(f"[TestAccount] Could not get numbers count: {e}")
+        
+        # Update database with counts
+        with get_db() as db:
+            is_postgres = DATABASE_URL is not None
+            if is_postgres:
+                db.execute(
+                    "UPDATE platform_accounts SET numbers_count=%s, updated_at=CURRENT_TIMESTAMP WHERE username=%s",
+                    (total_count, username)
+                )
+            else:
+                db.execute(
+                    "UPDATE platform_accounts SET numbers_count=?, updated_at=datetime('now') WHERE username=?",
+                    (total_count, username)
+                )
+        
+        return True, {
+            "username": username,
+            "userid": userid,
+            "total_numbers": total_count,
+            "online_numbers": online_count,
+            "password": password
+        }
+        
+    except Exception as e:
+        return False, {"error": str(e)}
 
 
 def get_next_available_account() -> dict | None:
@@ -6770,8 +6916,10 @@ async def add_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             "📝 *Add Platform Account*\n\n"
             "Usage: `/add_account <username> <password> [label]`\n\n"
             "Example: `/add_account Frankhustle2 f11111 Main Account`\n\n"
-            "💡 The account with the fewest numbers will be auto-selected\n"
-            "when the current account exceeds 110 numbers.",
+            "💡 The bot will:\n"
+            "• Test login credentials\n"
+            "• Count online numbers\n"
+            "• Auto-switch when current account exceeds 110 numbers",
             parse_mode="Markdown"
         )
         return
@@ -6780,17 +6928,62 @@ async def add_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     password = args[1]
     label = " ".join(args[2:]) if len(args) > 2 else None
     
-    if add_platform_account(username, password, label):
-        await update.message.reply_text(
-            f"✅ *Account Added Successfully*\n\n"
+    # Send initial message
+    msg = await update.message.reply_text(
+        f"🔄 Testing account `{username}`...\n"
+        f"⏳ Please wait...",
+        parse_mode="Markdown"
+    )
+    
+    # Test login and get counts
+    success, result = add_platform_account(username, password, label)
+    
+    if success:
+        # Build success message with details
+        text = f"✅ *Account Added Successfully!*\n\n"
+        text += f"👤 Username: `{username}`\n"
+        if label:
+            text += f"🏷️ Label: `{label}`\n"
+        text += f"🆔 Platform UID: `{result['userid']}`\n\n"
+        text += f"📊 *Number Counts:*\n"
+        text += f"   📞 Total numbers: `{result['total_numbers']}`\n"
+        text += f"   🟢 Online numbers: `{result['online_numbers']}`\n"
+        text += f"   🔴 Offline numbers: `{result['total_numbers'] - result['online_numbers']}`\n\n"
+        
+        # Show which account has fewest numbers (for auto-switch)
+        all_accounts = get_all_platform_accounts()
+        if len(all_accounts) > 1:
+            next_account = get_next_available_account()
+            if next_account:
+                text += f"🔄 *Next for auto-switch:*\n"
+                text += f"   `{next_account['username']}` ({next_account['hourly_numbers_count']} hourly numbers)\n\n"
+        
+        text += f"💡 This account will be used when the current one exceeds 110 numbers.\n"
+        text += f"Use `/list_accounts` to see all accounts."
+        
+        await msg.edit_text(text, parse_mode="Markdown")
+        
+        # Also send a separate notification about online numbers if any
+        if result['online_numbers'] > 0:
+            await update.message.reply_text(
+                f"🟢 *Numbers Already Online*\n\n"
+                f"Account `{username}` has `{result['online_numbers']}` number(s) already online.\n"
+                f"These numbers are ready to earn immediately!",
+                parse_mode="Markdown"
+            )
+    else:
+        error_msg = result.get("error", "Unknown error")
+        await msg.edit_text(
+            f"❌ *Failed to Add Account*\n\n"
             f"👤 Username: `{username}`\n"
-            f"🏷️ Label: {label or 'None'}\n\n"
-            f"📊 This account will be used when the current one exceeds 110 numbers.\n"
-            f"Use `/list_accounts` to see all accounts.",
+            f"📝 Error: `{error_msg}`\n\n"
+            f"Please check:\n"
+            f"• Username is correct\n"
+            f"• Password is correct\n"
+            f"• API is accessible\n\n"
+            f"Tip: Use `/switch_account` to test an existing account.",
             parse_mode="Markdown"
         )
-    else:
-        await update.message.reply_text("❌ Failed to add account. Please try again.")
 
 
 async def list_accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7250,6 +7443,65 @@ async def force_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         threading.Thread(target=wacash_login, daemon=True).start()
     
     await update.message.reply_text(f"✅ Force set earning mode to **{new_mode}**.\nRestart the bot or test by adding a number.", parse_mode="Markdown")
+    
+async def test_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test a specific platform account and show current online numbers (admin only)."""
+    if update.effective_user.id != ADMIN_TELEGRAM_ID:
+        await update.message.reply_text("Unauthorized.")
+        return
+    
+    args = context.args
+    if len(args) != 1:
+        await update.message.reply_text(
+            "📝 *Test Platform Account*\n\n"
+            "Usage: `/test_account <username>`\n"
+            "Example: `/test_account Frankhustle`\n\n"
+            "This will:\n"
+            "• Test login credentials\n"
+            "• Count online numbers\n"
+            "• Update account stats",
+            parse_mode="Markdown"
+        )
+        return
+    
+    username = args[0]
+    
+    msg = await update.message.reply_text(
+        f"🔄 Testing account `{username}`...\n"
+        f"⏳ Please wait...",
+        parse_mode="Markdown"
+    )
+    
+    success, result = test_platform_account(username)
+    
+    if success:
+        text = f"✅ *Account Test Successful!*\n\n"
+        text += f"👤 Username: `{username}`\n"
+        text += f"🆔 Platform UID: `{result['userid']}`\n\n"
+        text += f"📊 *Number Counts:*\n"
+        text += f"   📞 Total numbers: `{result['total_numbers']}`\n"
+        text += f"   🟢 Online numbers: `{result['online_numbers']}`\n"
+        text += f"   🔴 Offline numbers: `{result['total_numbers'] - result['online_numbers']}`\n\n"
+        
+        # Show if account is active
+        active = get_active_platform_account()
+        if active and active["username"] == username:
+            text += f"⭐ *This is the ACTIVE account*\n\n"
+        
+        text += f"✅ Login Status: Successful"
+        
+        await msg.edit_text(text, parse_mode="Markdown")
+    else:
+        await msg.edit_text(
+            f"❌ *Account Test Failed*\n\n"
+            f"👤 Username: `{username}`\n"
+            f"📝 Error: `{result.get('error', 'Unknown error')}`\n\n"
+            f"Please check:\n"
+            f"• Username is correct\n"
+            f"• Password is correct\n"
+            f"• Account exists in database",
+            parse_mode="Markdown"
+        )
     
 async def check_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_TELEGRAM_ID:
@@ -8043,6 +8295,7 @@ def main():
     application.add_handler(CommandHandler("switch_account", switch_account_command), group=-1)
     application.add_handler(CommandHandler("remove_account", remove_account_command), group=-1)
     application.add_handler(CommandHandler("sync_accounts", sync_accounts_command), group=-1)
+    application.add_handler(CommandHandler("test_account", test_account_command), group=-1)  # <-- ADD THIS LINE
 
     # ── Delete all numbers by mode (slash commands) ──────────────────
     application.add_handler(CommandHandler("delnums_manual", delnums_manual), group=-1)
