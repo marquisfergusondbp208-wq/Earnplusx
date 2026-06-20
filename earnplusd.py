@@ -672,11 +672,10 @@ def init_db():
                 db.execute("ALTER TABLE numbers ADD COLUMN offline_hours_processed INTEGER DEFAULT 0")
             except Exception as e:
                 log.info(f"Column offline_hours_processed may already exist: {e}")
-                # Rollback to clear the failed transaction state in PostgreSQL
+                # For PostgreSQL, commit to clear the failed transaction state
                 if DATABASE_URL:
                     try:
-                        conn = db._conn
-                        conn.rollback()
+                        db._conn.commit()
                     except:
                         pass
             
@@ -891,7 +890,7 @@ def init_db():
             for key, value in settings_data:
                 db.execute("INSERT INTO settings(key, value) VALUES(%s, %s) ON CONFLICT (key) DO NOTHING", (key, value))
             
-            # Create default admin user
+            # Create default admin user - NOW the users table exists!
             admin = db.execute("SELECT id FROM users WHERE telegram_id = %s", (ADMIN_TELEGRAM_ID,)).fetchone()
             if not admin:
                 ref = secrets.token_hex(4).upper()
@@ -902,7 +901,7 @@ def init_db():
                 log.info("Admin user created (telegram_id=%s)", ADMIN_TELEGRAM_ID)
                 
         else:
-            # Original SQLite code
+            # Original SQLite code - keep as is
             db.executescript("""
             CREATE TABLE IF NOT EXISTS users(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
