@@ -1098,20 +1098,21 @@ def init_db():
 
 def add_platform_account(username: str, password: str, label: str = None) -> tuple[bool, dict | None]:
     """
-    Add a new platform account to the system and test login.
+    Add a new platform account to the system and test login using WSJOBS API.
     Returns: (success, account_info_with_counts)
     """
     try:
-        # First, test login with the credentials
+        # Test login with WSJOBS
         http = requests.Session()
-        pm = _md5(_md5(password))
-        sign = _md5(_md5("/api/user/login") + username + pm)
+        
+        userpwd = _wsjobs_md5(_wsjobs_md5(password))
+        sign = _wsjobs_md5(_wsjobs_md5("/api/user/login") + username + userpwd)
         
         try:
             r = http.post(
-                f"{BASE_URL}/api/user/login",
-                json={"username": username, "userpwd": pm, "sign": sign},
-                headers=_hdrs(),
+                f"{WSJOBS_BASE_URL}/api/user/login",
+                json={"username": username, "userpwd": userpwd, "sign": sign},
+                headers=_wsjobs_hdrs(),
                 timeout=15
             )
             d = r.json()
@@ -1120,20 +1121,18 @@ def add_platform_account(username: str, password: str, label: str = None) -> tup
                 log.error(f"[AddAccount] Login failed for {username}: {d.get('message')}")
                 return False, {"error": d.get('message', 'Login failed')}
             
-            # Login successful - get user info
             info = d["data"]["info"]
             userid = info["id"]
             
-            # Now get online numbers count
+            # Get online numbers count
             online_count = 0
             total_count = 0
             try:
-                # Use the session to get app info
-                sign2 = _s0("/api/user/get_appinfo", str(userid), username)
+                sign2 = _wsjobs_md5(_wsjobs_md5("/api/user/get_appinfo") + str(userid) + username)
                 r2 = http.get(
-                    f"{BASE_URL}/api/user/get_appinfo",
+                    f"{WSJOBS_BASE_URL}/api/user/get_appinfo",
                     params={"page": 1, "pagesize": 50, "username": username, "userid": userid, "sign": sign2},
-                    headers=_hdrs(),
+                    headers=_wsjobs_hdrs(),
                     timeout=15
                 )
                 d2 = r2.json()
@@ -1141,23 +1140,21 @@ def add_platform_account(username: str, password: str, label: str = None) -> tup
                     chunk = d2["data"].get("list", [])
                     total_count = len(chunk)
                     for item in chunk:
-                        if item.get("status") == 1:  # 1 = online
+                        if item.get("isonline") == 1:
                             online_count += 1
             except Exception as e:
                 log.warning(f"[AddAccount] Could not get numbers count: {e}")
             
-            # Now save to database
+            # Save to database
             with get_db() as db:
                 is_postgres = DATABASE_URL is not None
                 
-                # Check if account already exists
                 if is_postgres:
                     existing = db.execute("SELECT id FROM platform_accounts WHERE username=%s", (username,)).fetchone()
                 else:
                     existing = db.execute("SELECT id FROM platform_accounts WHERE username=?", (username,)).fetchone()
                 
                 if existing:
-                    # Update existing account
                     if is_postgres:
                         db.execute(
                             "UPDATE platform_accounts SET password=%s, label=%s, numbers_count=%s, updated_at=CURRENT_TIMESTAMP WHERE username=%s",
@@ -1169,7 +1166,6 @@ def add_platform_account(username: str, password: str, label: str = None) -> tup
                             (password, label, total_count, username)
                         )
                 else:
-                    # Insert new account
                     if is_postgres:
                         db.execute(
                             "INSERT INTO platform_accounts(username, password, label, numbers_count) VALUES(%s, %s, %s, %s)",
@@ -1181,7 +1177,6 @@ def add_platform_account(username: str, password: str, label: str = None) -> tup
                             (username, password, label, total_count)
                         )
             
-            # Return success with account info
             return True, {
                 "username": username,
                 "userid": userid,
@@ -1191,10 +1186,8 @@ def add_platform_account(username: str, password: str, label: str = None) -> tup
             }
             
         except requests.exceptions.Timeout:
-            log.error(f"[AddAccount] Timeout logging in to {username}")
             return False, {"error": "Connection timeout"}
         except Exception as e:
-            log.error(f"[AddAccount] Login error for {username}: {e}")
             return False, {"error": str(e)}
             
     except Exception as e:
@@ -1285,7 +1278,7 @@ def update_account_numbers_count(username: str, hourly_count: int = None, total_
         
 def test_platform_account(username: str) -> tuple[bool, dict | None]:
     """
-    Test login for an existing platform account and get current counts.
+    Test login for an existing platform account and get current counts using WSJOBS API.
     Returns: (success, account_info_with_counts)
     """
     with get_db() as db:
@@ -1300,16 +1293,16 @@ def test_platform_account(username: str) -> tuple[bool, dict | None]:
         
         password = acc["password"]
     
-    # Test login
+    # Test login with WSJOBS
     http = requests.Session()
-    pm = _md5(_md5(password))
-    sign = _md5(_md5("/api/user/login") + username + pm)
+    userpwd = _wsjobs_md5(_wsjobs_md5(password))
+    sign = _wsjobs_md5(_wsjobs_md5("/api/user/login") + username + userpwd)
     
     try:
         r = http.post(
-            f"{BASE_URL}/api/user/login",
-            json={"username": username, "userpwd": pm, "sign": sign},
-            headers=_hdrs(),
+            f"{WSJOBS_BASE_URL}/api/user/login",
+            json={"username": username, "userpwd": userpwd, "sign": sign},
+            headers=_wsjobs_hdrs(),
             timeout=15
         )
         d = r.json()
@@ -1324,11 +1317,11 @@ def test_platform_account(username: str) -> tuple[bool, dict | None]:
         online_count = 0
         total_count = 0
         try:
-            sign2 = _s0("/api/user/get_appinfo", str(userid), username)
+            sign2 = _wsjobs_md5(_wsjobs_md5("/api/user/get_appinfo") + str(userid) + username)
             r2 = http.get(
-                f"{BASE_URL}/api/user/get_appinfo",
+                f"{WSJOBS_BASE_URL}/api/user/get_appinfo",
                 params={"page": 1, "pagesize": 50, "username": username, "userid": userid, "sign": sign2},
-                headers=_hdrs(),
+                headers=_wsjobs_hdrs(),
                 timeout=15
             )
             d2 = r2.json()
@@ -1336,12 +1329,12 @@ def test_platform_account(username: str) -> tuple[bool, dict | None]:
                 chunk = d2["data"].get("list", [])
                 total_count = len(chunk)
                 for item in chunk:
-                    if item.get("status") == 1:
+                    if item.get("isonline") == 1:
                         online_count += 1
         except Exception as e:
             log.warning(f"[TestAccount] Could not get numbers count: {e}")
         
-        # Update database with counts
+        # Update database
         with get_db() as db:
             is_postgres = DATABASE_URL is not None
             if is_postgres:
@@ -1670,19 +1663,26 @@ def _wsjobs_hdrs(x=None):
     return h
 
 def wsjobs_login() -> bool:
-    """Login to WSJOBS platform using credentials from database settings."""
+    """Login to WSJOBS platform using credentials from active platform account."""
     global wsjobs_session
     
-    username = get_setting("wsjobs_account", "")
-    password = get_setting("wsjobs_password", "")
+    # Get credentials from active platform account
+    active_account = get_active_platform_account()
     
-    if not username or not password:
-        log.error("[WSJOBS] No credentials configured! Use /set_wsjobs to set them.")
-        return False
+    if active_account:
+        username = active_account["username"]
+        password = active_account["password"]
+        log.info(f"[WSJOBS] Using active account: {username}")
+    else:
+        # Fallback to settings
+        username = get_setting("wsjobs_account", "")
+        password = get_setting("wsjobs_password", "")
+        
+        if not username or not password:
+            log.error("[WSJOBS] No credentials configured! Use /add_account to add an account.")
+            return False
     
     http = requests.Session()
-    
-    # Signing: userpwd = md5(md5(password)), sign = md5(md5("/api/user/login") + username + userpwd)
     userpwd = _wsjobs_md5(_wsjobs_md5(password))
     sign = _wsjobs_md5(_wsjobs_md5("/api/user/login") + username + userpwd)
     
