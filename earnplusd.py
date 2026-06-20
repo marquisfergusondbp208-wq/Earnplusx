@@ -5680,6 +5680,8 @@ async def handle_settings_input(update: Update, context: ContextTypes.DEFAULT_TY
 # Admin Panel Handlers (callbacks)
 # ----------------------------------------------------------------------
 async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global PLATFORM_USER, PLATFORM_PASS  # <-- ADD THIS AT THE VERY TOP
+    
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -6363,8 +6365,7 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 await query.edit_message_text(f"❌ Account `{username}` not found.", parse_mode="Markdown")
                 return
             
-            # Switch
-            global PLATFORM_USER, PLATFORM_PASS
+            # Switch - REMOVED global declaration from here (it's now at the top)
             PLATFORM_USER = acc["username"]
             PLATFORM_PASS = acc["password"]
             
