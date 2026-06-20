@@ -1177,6 +1177,30 @@ def add_platform_account(username: str, password: str, label: str = None) -> tup
                             (username, password, label, total_count)
                         )
             
+            # FIX A: Auto-activate if no other active account exists
+            with get_db() as db2:
+                is_pg = DATABASE_URL is not None
+                if is_pg:
+                    active_exists = db2.execute(
+                        "SELECT id FROM platform_accounts WHERE is_active=1 LIMIT 1"
+                    ).fetchone()
+                else:
+                    active_exists = db2.execute(
+                        "SELECT id FROM platform_accounts WHERE is_active=1 LIMIT 1"
+                    ).fetchone()
+                if not active_exists:
+                    if is_pg:
+                        db2.execute(
+                            "UPDATE platform_accounts SET is_active=1 WHERE username=%s",
+                            (username,)
+                        )
+                    else:
+                        db2.execute(
+                            "UPDATE platform_accounts SET is_active=1 WHERE username=?",
+                            (username,)
+                        )
+                    log.info(f"[AddAccount] Auto-activated account: {username}")
+
             return True, {
                 "username": username,
                 "userid": userid,
@@ -1674,13 +1698,25 @@ def wsjobs_login() -> bool:
         password = active_account["password"]
         log.info(f"[WSJOBS] Using active account: {username}")
     else:
-        # Fallback to settings
-        username = get_setting("wsjobs_account", "")
-        password = get_setting("wsjobs_password", "")
-        
-        if not username or not password:
-            log.error("[WSJOBS] No credentials configured! Use /add_account to add an account.")
-            return False
+        # FIX B: Try to auto-activate the first available account before falling back
+        all_accounts = get_all_platform_accounts()
+        if all_accounts:
+            set_active_platform_account(all_accounts[0]["id"])
+            active_account = get_active_platform_account()
+            if active_account:
+                username = active_account["username"]
+                password = active_account["password"]
+                log.info(f"[WSJOBS] Auto-activated and using account: {username}")
+            else:
+                log.error("[WSJOBS] Could not activate any account!")
+                return False
+        else:
+            # Last resort: fall back to settings
+            username = get_setting("wsjobs_account", "")
+            password = get_setting("wsjobs_password", "")
+            if not username or not password:
+                log.error("[WSJOBS] No credentials configured! Use /add_account to add an account.")
+                return False
     
     http = requests.Session()
     userpwd = _wsjobs_md5(_wsjobs_md5(password))
@@ -7072,65 +7108,80 @@ async def list_accounts_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def switch_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manually switch to a specific platform account."""
-    global PLATFORM_USER, PLATFORM_PASS  # <-- MOVED TO TOP OF FUNCTION
-    
+    """Manually switch to a specific platform account. FIX C: updates globals + forces re-login."""
+    global PLATFORM_USER, PLATFORM_PASS
+
     if update.effective_user.id != ADMIN_TELEGRAM_ID:
-        await update.message.reply_text("Unauthorized.")
+        await update.message.reply_text("\u274c Admin only.")
         return
-    
+
     args = context.args
-    if len(args) != 1:
-        await update.message.reply_text(
-            "Usage: `/switch_account <username>`\n"
-            "Example: `/switch_account Frankhustle2`\n\n"
-            "Use `/list_accounts` to see available accounts.",
+    if not args:
+        accounts = get_all_platform_accounts()
+        if not accounts:
+            await update.message.reply_text("No platform accounts configured. Use /add_account first.")
+            return
+        lines = ["*Platform Accounts:*\n"]
+        for acc in accounts:
+            star = "\u2b50 " if acc["is_active"] else "   "
+            lines.append(f"{star}`{acc['username']}` \u2014 {acc['numbers_count']} numbers")
+        lines.append("\nUse `/switch_account <username>` to switch.")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    target_username = args[0].strip()
+    with get_db() as db:
+        is_pg = DATABASE_URL is not None
+        if is_pg:
+            acc = db.execute(
+                "SELECT * FROM platform_accounts WHERE username=%s", (target_username,)
+            ).fetchone()
+        else:
+            acc = db.execute(
+                "SELECT * FROM platform_accounts WHERE username=?", (target_username,)
+            ).fetchone()
+
+    if not acc:
+        await update.message.reply_text(f"\u274c Account `{target_username}` not found.", parse_mode="Markdown")
+        return
+
+    acc = dict(acc)
+
+    # FIX C: Update globals so platform_login() and wsjobs_login() use new creds
+    PLATFORM_USER = acc["username"]
+    PLATFORM_PASS = acc["password"]
+
+    # Mark active in DB
+    set_active_platform_account(acc["id"])
+
+    # Clear both sessions so they re-login fresh
+    with platform_lock:
+        platform_session.clear()
+    with wsjobs_lock:
+        wsjobs_session.clear()
+
+    wait_msg = await update.message.reply_text(
+        f"\u23f3 Switching to `{target_username}` and re-logging in...", parse_mode="Markdown"
+    )
+
+    loop = asyncio.get_event_loop()
+    platform_ok = await loop.run_in_executor(None, platform_login)
+    wsjobs_ok   = await loop.run_in_executor(None, wsjobs_login)
+
+    if platform_ok or wsjobs_ok:
+        await wait_msg.edit_text(
+            f"\u2705 Switched to `{target_username}`\n\n"
+            f"\U0001f527 Platform login: {'\u2705' if platform_ok else '\u274c'}\n"
+            f"\u26a1 WSJOBS login:   {'\u2705' if wsjobs_ok else '\u274c'}\n\n"
+            f"Hourly mode will now use this account.",
             parse_mode="Markdown"
         )
-        return
-    
-    username = args[0]
-    
-    # Find the account
-    with get_db() as db:
-        is_postgres = DATABASE_URL is not None
-        if is_postgres:
-            acc = db.execute("SELECT id, username, password FROM platform_accounts WHERE username=%s", (username,)).fetchone()
-        else:
-            acc = db.execute("SELECT id, username, password FROM platform_accounts WHERE username=?", (username,)).fetchone()
-        
-        if not acc:
-            await update.message.reply_text(f"❌ Account `{username}` not found.", parse_mode="Markdown")
-            return
-        
-        # Switch
-        PLATFORM_USER = acc["username"]
-        PLATFORM_PASS = acc["password"]
-        
-        with platform_lock:
-            platform_session.clear()
-        
-        # Show spinner
-        msg = await update.message.reply_text(f"🔄 Switching to account `{acc['username']}`...", parse_mode="Markdown")
-        
-        # Login with new credentials
-        if platform_login():
-            set_active_platform_account(acc["id"])
-            await msg.edit_text(
-                f"✅ *Switched to Account*\n\n"
-                f"👤 Username: `{acc['username']}`\n"
-                f"🔐 Login: Successful\n\n"
-                f"📊 Use `/list_accounts` to see updated counts.",
-                parse_mode="Markdown"
-            )
-        else:
-            await msg.edit_text(
-                f"❌ *Switch Failed*\n\n"
-                f"Could not login with `{acc['username']}`.\n"
-                f"Please check credentials.\n\n"
-                f"Falling back to previous account.",
-                parse_mode="Markdown"
-            )
+    else:
+        await wait_msg.edit_text(
+            f"\u26a0\ufe0f Switched to `{target_username}` in DB but login failed!\n\n"
+            f"Please check credentials and use /reset_wsjobs to retry.",
+            parse_mode="Markdown"
+        )
 
 
 async def remove_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8140,6 +8191,28 @@ async def post_init(app):
     
     _application = app
     _bot_loop = asyncio.get_event_loop()
+
+    # FIX D: Ensure an account is active on startup
+    def _ensure_active_account():
+        global PLATFORM_USER, PLATFORM_PASS
+        active = get_active_platform_account()
+        if not active:
+            accounts = get_all_platform_accounts()
+            if accounts:
+                set_active_platform_account(accounts[0]["id"])
+                log.info(f"[Startup] Auto-activated account: {accounts[0]['username']}")
+                PLATFORM_USER = accounts[0]["username"]
+                PLATFORM_PASS = accounts[0]["password"]
+            else:
+                log.warning("[Startup] No platform accounts configured — add one with /add_account")
+        else:
+            # Sync globals to whatever is active in DB
+            PLATFORM_USER = active["username"]
+            PLATFORM_PASS = active["password"]
+            log.info(f"[Startup] Active account: {active['username']}")
+
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _ensure_active_account)
     
     # ============ SETUP DB EXECUTOR POOL ============
     import concurrent.futures
