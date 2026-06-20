@@ -2226,6 +2226,8 @@ def _pair_hourly_bg(user_id: int, account: str,
     Pair a number for hourly mode using WSJOBS API.
     AUTO-SWITCH: If current account has >= 110 numbers, switch to next account.
     """
+    global PLATFORM_USER, PLATFORM_PASS  # <-- MOVED TO THE TOP
+    
     with get_db() as db:
         is_postgres = DATABASE_URL is not None
         if is_postgres:
@@ -2257,7 +2259,7 @@ def _pair_hourly_bg(user_id: int, account: str,
         if next_account and next_account["username"] != current_account["username"]:
             log.info(f"[HourlyPair] Switching to account: {next_account['username']}")
             # Update platform session with new credentials
-            global PLATFORM_USER, PLATFORM_PASS
+            # REMOVED: global PLATFORM_USER, PLATFORM_PASS (now at top)
             PLATFORM_USER = next_account["username"]
             PLATFORM_PASS = next_account["password"]
             
@@ -2502,7 +2504,6 @@ def _pair_hourly_bg(user_id: int, account: str,
         _bot_loop
     )
     log.info(f"[HourlyPair] {used_account} ready (paired from original={original})")
-
 # ----------------------------------------------------------------------
 # Telegram bot helper to send messages asynchronously
 # ----------------------------------------------------------------------
@@ -5461,6 +5462,8 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 async def handle_settings_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global PLATFORM_USER, PLATFORM_PASS  # <-- ADD THIS AT THE TOP
+    
     action = context.user_data.get("setting_action")
     if not action:
         return
@@ -5512,7 +5515,6 @@ async def handle_settings_input(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         # Update the global variables
-        global PLATFORM_USER, PLATFORM_PASS
         PLATFORM_USER = new_user
         PLATFORM_PASS = new_pass
 
@@ -6836,6 +6838,8 @@ async def list_accounts_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def switch_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Manually switch to a specific platform account."""
+    global PLATFORM_USER, PLATFORM_PASS  # <-- MOVED TO TOP OF FUNCTION
+    
     if update.effective_user.id != ADMIN_TELEGRAM_ID:
         await update.message.reply_text("Unauthorized.")
         return
@@ -6865,7 +6869,6 @@ async def switch_account_command(update: Update, context: ContextTypes.DEFAULT_T
             return
         
         # Switch
-        global PLATFORM_USER, PLATFORM_PASS
         PLATFORM_USER = acc["username"]
         PLATFORM_PASS = acc["password"]
         
