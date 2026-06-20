@@ -7168,11 +7168,13 @@ async def switch_account_command(update: Update, context: ContextTypes.DEFAULT_T
     platform_ok = await loop.run_in_executor(None, platform_login)
     wsjobs_ok   = await loop.run_in_executor(None, wsjobs_login)
 
+    p_icon = "\u2705" if platform_ok else "\u274c"
+    w_icon = "\u2705" if wsjobs_ok else "\u274c"
     if platform_ok or wsjobs_ok:
         await wait_msg.edit_text(
             f"\u2705 Switched to `{target_username}`\n\n"
-            f"\U0001f527 Platform login: {'\u2705' if platform_ok else '\u274c'}\n"
-            f"\u26a1 WSJOBS login:   {'\u2705' if wsjobs_ok else '\u274c'}\n\n"
+            f"\U0001f527 Platform login: {p_icon}\n"
+            f"\u26a1 WSJOBS login:   {w_icon}\n\n"
             f"Hourly mode will now use this account.",
             parse_mode="Markdown"
         )
