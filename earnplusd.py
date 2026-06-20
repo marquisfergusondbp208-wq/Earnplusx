@@ -6450,8 +6450,28 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             
             text += f"   └ 📞 Total numbers: {num_count}\n"
             text += f"   └ ⚡ Hourly numbers: {hourly_count}\n"
-            text += f"   └ 📅 Created: {acc['created_at'][:16] if acc['created_at'] else 'Unknown'}\n"
-            text += f"   └ 🔄 Updated: {acc['updated_at'][:16] if acc['updated_at'] else 'Unknown'}\n"
+            
+            # Handle datetime objects properly
+            created = acc.get('created_at')
+            if created:
+                if hasattr(created, 'strftime'):
+                    created_str = created.strftime("%Y-%m-%d %H:%M")
+                else:
+                    created_str = str(created)[:16] if created else 'Unknown'
+            else:
+                created_str = 'Unknown'
+            
+            updated = acc.get('updated_at')
+            if updated:
+                if hasattr(updated, 'strftime'):
+                    updated_str = updated.strftime("%Y-%m-%d %H:%M")
+                else:
+                    updated_str = str(updated)[:16] if updated else 'Unknown'
+            else:
+                updated_str = 'Unknown'
+            
+            text += f"   └ 📅 Created: {created_str}\n"
+            text += f"   └ 🔄 Updated: {updated_str}\n"
             text += "\n"
         
         text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6622,9 +6642,11 @@ async def admin_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     elif data == "admin_account_stats":
         with get_db() as db:
-            total_points = db.execute(
+            # Fix: Check if result exists before accessing
+            result = db.execute(
                 "SELECT COALESCE(SUM(amount),0) AS c FROM transactions WHERE type='earn' AND description LIKE 'Hourly earning%'"
-            ).fetchone()["c"]
+            ).fetchone()
+            total_points = result["c"] if result else 0
             total_ngn = pts_to_ngn(total_points)
             
             hourly_users = db.execute(
