@@ -5444,83 +5444,130 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚀 Sending started in background. You will receive the result here shortly.")
         return
     
-    # ============ OPTIMIZED MANUAL MODE SEND ALL ============
+    # ============ UPDATED MANUAL MODE SEND ALL WITH BLAST ============
     with get_db() as db:
         rows = db.execute("SELECT account, wsid FROM numbers WHERE user_id=? AND status='online' AND wsid IS NOT NULL", (uid,)).fetchall()
     if not rows:
         await update.message.reply_text("No online numbers were found. Please connect a number first using *Add Number*.")
         return
     
-    msg = await update.message.reply_text("🔄 **Sending messages concurrently...**\n⏳ Please wait...", parse_mode="Markdown")
+    msg = await update.message.reply_text("🔄 **Blasting messages continuously...**\n⏳ Sending until numbers go offline...", parse_mode="Markdown")
     ppm = int(get_setting("points_per_msg", "200"))
-    results = []
+    
+    # Track results per number
+    results = {}
     results_lock = threading.Lock()
+    active_numbers = {row["account"]: row["wsid"] for row in rows}
+    stop_signal = threading.Event()
     
-    def send_one(acct, wsid):
-        """Send a single message to one number"""
-        try:
-            ok, _ = api_sendmsg(acct, wsid)
-        except Exception as e:
-            log.warning(f"Send failed for {acct}: {e}")
-            ok = False
-        with results_lock:
-            results.append((acct, ok))
-        return ok
-    
-    # Run all sends concurrently using ThreadPoolExecutor
-    loop = asyncio.get_event_loop()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(rows), 30)) as executor:
-        futures = []
-        for row in rows:
-            future = loop.run_in_executor(executor, send_one, row["account"], row["wsid"])
-            futures.append(future)
+    def send_until_offline(acct, wsid):
+        """Keep sending messages to a number until it goes offline."""
+        total_sent = 0
+        consecutive_failures = 0
         
-        # Wait for all to complete
-        await asyncio.gather(*futures, return_exceptions=True)
-    
-    sent = sum(1 for _, ok in results if ok)
-    total_earned_pts = sent * ppm
-    
-    if sent > 0:
-        # Batch database updates
-        with get_db() as db:
-            _credit(db, uid, total_earned_pts, f"Manual send-all")
-            _increment_daily_msgs(db, uid, sent)
-            for acct, ok in results:
+        while not stop_signal.is_set():
+            try:
+                ok, _ = api_sendmsg(acct, wsid)
+                
                 if ok:
-                    db.execute("UPDATE numbers SET msgs_sent=COALESCE(msgs_sent,0)+1 WHERE user_id=? AND account=?", (uid, acct))
-            u = db.execute("SELECT referred_by FROM users WHERE id=?", (uid,)).fetchone()
-            if u and u["referred_by"]:
-                bonus = max(1, int(total_earned_pts * float(get_setting("referral_pct", "5")) / 100))
-                _credit(db, u["referred_by"], bonus, f"Ref bonus from uid={uid}", "referral")
-            new_bal = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()["balance"]
+                    total_sent += 1
+                    consecutive_failures = 0
+                    # Small delay between successful sends to avoid rate limiting
+                    time.sleep(0.5)
+                else:
+                    consecutive_failures += 1
+                    # Check if number is still online after failures
+                    status = api_phonestatus(acct)
+                    if status != 1:
+                        # Number went offline - exit
+                        break
+                    # Wait before retry
+                    time.sleep(2)
+                    
+            except Exception as e:
+                log.warning(f"Send failed for {acct}: {e}")
+                consecutive_failures += 1
+                time.sleep(2)
+            
+            # If too many consecutive failures, check if number is still online
+            if consecutive_failures >= 5:
+                status = api_phonestatus(acct)
+                if status != 1:
+                    break
+                consecutive_failures = 0
         
-        ngn_earned = pts_to_ngn(total_earned_pts)
+        # Update results
+        with results_lock:
+            results[acct] = {
+                "sent": total_sent,
+                "status": "offline" if not stop_signal.is_set() else "stopped"
+            }
         
-        # Build result summary (limit to first 10 for readability)
-        summary_lines = []
-        for acct, ok in results[:10]:
-            summary_lines.append(f"{'✅' if ok else '❌'} `{acct}`")
-        if len(results) > 10:
-            summary_lines.append(f"... and {len(results) - 10} more")
+        # Update database with total sent for this number
+        if total_sent > 0:
+            with get_db() as db2:
+                db2.execute("UPDATE numbers SET msgs_sent=COALESCE(msgs_sent,0)+? WHERE user_id=? AND account=?", 
+                           (total_sent, uid, acct))
+        return total_sent
+    
+    # Start background blast task
+    async def background_blast():
+        loop = asyncio.get_event_loop()
         
-        summary = "\n".join(summary_lines)
-        await msg.edit_text(
-            f"✅ *Send Complete!*\n\n"
-            f"📤 Sent: `{sent}/{len(rows)}` messages\n"
-            f"💎 Earned: `{total_earned_pts:,}` pts\n"
-            f"💵 ≈ ₦{ngn_earned:.2f}\n"
-            f"💰 New balance: `{new_bal:,}` pts\n\n"
-            f"*Results:*\n{summary}",
-            parse_mode="Markdown"
-        )
-    else:
-        await msg.edit_text(
-            f"❌ *Send Failed*\n\n"
-            f"0/{len(rows)} messages sent.\n"
-            f"Please check that your numbers are online and try again.",
-            parse_mode="Markdown"
-        )
+        # Start sending for each number concurrently
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(active_numbers), 10)) as executor:
+            futures = []
+            for acct, wsid in active_numbers.items():
+                future = loop.run_in_executor(executor, send_until_offline, acct, wsid)
+                futures.append(future)
+            
+            # Wait for all to complete (when numbers go offline or we stop)
+            await asyncio.gather(*futures, return_exceptions=True)
+        
+        # Calculate totals
+        total_sent = sum(r["sent"] for r in results.values())
+        total_earned_pts = total_sent * ppm
+        
+        if total_sent > 0:
+            with get_db() as db:
+                _credit(db, uid, total_earned_pts, f"Manual blast send-all")
+                _increment_daily_msgs(db, uid, total_sent)
+                u = db.execute("SELECT referred_by FROM users WHERE id=?", (uid,)).fetchone()
+                if u and u["referred_by"]:
+                    bonus = max(1, int(total_earned_pts * float(get_setting("referral_pct", "5")) / 100))
+                    _credit(db, u["referred_by"], bonus, f"Ref bonus from uid={uid}", "referral")
+                new_bal = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()["balance"]
+            
+            ngn_earned = pts_to_ngn(total_earned_pts)
+            
+            # Build result summary
+            summary_lines = []
+            for acct, r in results.items():
+                status_icon = "✅" if r["status"] != "stopped" else "⏹️"
+                summary_lines.append(f"{status_icon} `{acct}` — {r['sent']} msgs")
+            
+            summary = "\n".join(summary_lines)
+            await msg.edit_text(
+                f"✅ *Blast Complete!*\n\n"
+                f"📤 Total sent: `{total_sent}` messages\n"
+                f"💎 Earned: `{total_earned_pts:,}` pts\n"
+                f"💵 ≈ ₦{ngn_earned:.2f}\n"
+                f"💰 New balance: `{new_bal:,}` pts\n\n"
+                f"*Results:*\n{summary}",
+                parse_mode="Markdown"
+            )
+        else:
+            await msg.edit_text(
+                f"❌ *Blast Failed*\n\n"
+                f"0 messages sent.\n"
+                f"All numbers may have gone offline immediately.",
+                parse_mode="Markdown"
+            )
+    
+    # Start the background task
+    asyncio.create_task(background_blast())
+    await update.message.reply_text("🚀 **Blast started!** Messages will be sent until all numbers go offline.\nYou'll get the final results here.")
+    return
 
 # Leaderboard
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
