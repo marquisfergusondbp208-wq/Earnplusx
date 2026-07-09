@@ -123,35 +123,46 @@ log = logging.getLogger("earnplus_bot")
 async def send_telegram(chat_id: int, text: str, parse_mode: str = None, reply_markup=None):
     """Send a Telegram message asynchronously."""
     global _application
+    log.info(f"[send_telegram] Sending to chat_id={chat_id}, text length={len(text)}")
     try:
-        if _application and _application.bot:
-            await _application.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup
-            )
-        else:
-            log.error("Application bot not available")
+        if _application is None:
+            log.error("[send_telegram] Application is None!")
+            return None
+        if _application.bot is None:
+            log.error("[send_telegram] Bot is None!")
+            return None
+        
+        message = await _application.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup
+        )
+        log.info(f"[send_telegram] ✅ Message sent successfully, msg_id={message.message_id}")
+        return message
     except Exception as e:
-        log.error(f"Failed to send Telegram message: {e}")
+        log.error(f"[send_telegram] ❌ Failed: {e}")
+        return None
 
 async def edit_telegram_message(message, text: str, parse_mode: str = None, reply_markup=None):
     """Edit a Telegram message asynchronously."""
     global _application
+    log.info(f"[edit_telegram_message] Editing message_id={message.message_id if message else 'None'}")
     try:
-        if _application and _application.bot:
-            await _application.bot.edit_message_text(
-                chat_id=message.chat_id,
-                message_id=message.message_id,
-                text=text,
-                parse_mode=parse_mode,
-                reply_markup=reply_markup
-            )
-        else:
-            log.error("Application bot not available")
+        if _application is None or _application.bot is None:
+            log.error("[edit_telegram_message] Application or bot not available")
+            return
+        
+        await _application.bot.edit_message_text(
+            chat_id=message.chat_id,
+            message_id=message.message_id,
+            text=text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup
+        )
+        log.info("[edit_telegram_message] ✅ Edit successful")
     except Exception as e:
-        log.error(f"Failed to edit Telegram message: {e}")
+        log.error(f"[edit_telegram_message] ❌ Failed: {e}")
         
 # ----------------------------------------------------------------------
 # Global variables for platform session and active pairs
@@ -2341,6 +2352,8 @@ def _next_number_variant(original: str, current: str,
 
 def _pair_bg(user_id: int, account: str):
     """Manual/Auto mode pairing — country flag, copy button, clean messages."""
+    log.info(f"[Pair] ===== STARTING _pair_bg for {account} (uid={user_id}) =====")
+    
     with get_db() as db:
         is_postgres = DATABASE_URL is not None
         if is_postgres:
@@ -2351,6 +2364,7 @@ def _pair_bg(user_id: int, account: str):
             log.error(f"[Pair] No telegram_id for user {user_id}")
             return
         telegram_id = user_row["telegram_id"]
+        log.info(f"[Pair] telegram_id={telegram_id}")
 
     log.info(f"[Pair] Start {account} uid={user_id}")
 
@@ -2367,21 +2381,35 @@ def _pair_bg(user_id: int, account: str):
         }
 
     country_flag = get_country_flag(account)
+    log.info(f"[Pair] country_flag={country_flag}")
 
     # Send single status message
+    log.info(f"[Pair] Sending initial message to {telegram_id}...")
     future = asyncio.run_coroutine_threadsafe(
         send_telegram(telegram_id, f"🔗 {country_flag} Linking `{account}`", parse_mode="Markdown"),
         _bot_loop
     )
     try:
         status_msg = future.result(timeout=15)
-    except Exception:
+        if status_msg:
+            log.info(f"[Pair] ✅ Initial message sent, msg_id={status_msg.message_id}")
+        else:
+            log.error(f"[Pair] ❌ Initial message returned None")
+    except Exception as e:
+        log.error(f"[Pair] ❌ Failed to send initial message: {e}")
         status_msg = None
 
     def _edit(text, markup=None):
+        log.info(f"[Pair] _edit called: {text[:50]}...")
         if status_msg:
             asyncio.run_coroutine_threadsafe(
                 edit_telegram_message(status_msg, text, parse_mode="Markdown", reply_markup=markup),
+                _bot_loop
+            )
+        else:
+            log.warning(f"[Pair] No status_msg to edit, sending new message instead")
+            asyncio.run_coroutine_threadsafe(
+                send_telegram(telegram_id, text, parse_mode="Markdown", reply_markup=markup),
                 _bot_loop
             )
 
@@ -2391,13 +2419,37 @@ def _pair_bg(user_id: int, account: str):
 
     _edit(f"🔄 {country_flag} `{account}` — Getting code...", cancel_markup)
 
+    log.info(f"[Pair] Getting pairing code for {account}...")
     pair_code = None
     for i in range(MAX_RETRIES):
+        log.info(f"[Pair] Attempt {i+1}/{MAX_RETRIES} to get code...")
         code, _ = api_get_code(account)
         if code:
             pair_code = code
+            log.info(f"[Pair] ✅ Got pairing code: {pair_code}")
             break
+        log.warning(f"[Pair] Attempt {i+1} failed")
         time.sleep(min(i + 1, 5))
+
+    if not pair_code:
+        log.error(f"[Pair] ❌ Failed to get pairing code for {account}")
+        with pairs_lock:
+            _ap2 = active_pairs.get(account, {})
+            orig = _ap2.get("original", account)
+            c_pfx = _ap2.get("country_prefix")
+            l_prt = _ap2.get("local_part")
+        next_variant = _next_number_variant(orig, account, c_pfx, l_prt)
+        next_num = next_variant if next_variant else account
+        _edit(
+            f"❌ {country_flag} Could not get pairing code for `{account}`\nTap below to try next variant.",
+            InlineKeyboardMarkup([[InlineKeyboardButton(
+                f"➡️ Try Next: {next_variant}" if next_variant else "🔄 Retry",
+                callback_data=f"linkagain_{orig}__{next_num}"
+            )]])
+        )
+        with pairs_lock:
+            active_pairs.pop(account, None)
+        return
 
     with pairs_lock:
         if account in active_pairs:
@@ -2424,6 +2476,7 @@ def _pair_bg(user_id: int, account: str):
             btn_rows.append([InlineKeyboardButton("➡️ Next Pairing Code", callback_data=f"linkagain_{orig}__{next_variant}")])
         btn_rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"delnum_{account}")])
 
+        log.info(f"[Pair] Sending pairing code to user: {pair_code}")
         _edit(
             f"🔐 {country_flag} Pairing Code sent successfully\n`{account}`.",
             InlineKeyboardMarkup(btn_rows)
@@ -2448,6 +2501,7 @@ def _pair_bg(user_id: int, account: str):
         return
 
     # ── Poll for number coming online ─────────────────────────────────────────
+    log.info(f"[Pair] Starting polling for {account} to come online...")
     elapsed = 0
     came_online = False
     last_update = 0
@@ -2460,6 +2514,7 @@ def _pair_bg(user_id: int, account: str):
     while elapsed < 7200:
         with pairs_lock:
             if active_pairs.get(account, {}).get("cancelled"):
+                log.info(f"[Pair] Cancelled by user: {account}")
                 with get_db() as db:
                     is_postgres = DATABASE_URL is not None
                     if is_postgres:
@@ -2471,6 +2526,7 @@ def _pair_bg(user_id: int, account: str):
 
         if elapsed - last_update >= 120:
             remaining = max(0, (7200 - elapsed) // 60)
+            log.info(f"[Pair] Status update: {remaining}m remaining for {account}")
             _edit(
                 f"⏳ {country_flag} Waiting for `{account}` to come online… _{remaining}m left_",
                 InlineKeyboardMarkup([[InlineKeyboardButton("📋 Copy Pairing Code", copy_text=pair_code)],
@@ -2480,6 +2536,7 @@ def _pair_bg(user_id: int, account: str):
 
         status = api_phonestatus(account)
         if status == 1:
+            log.info(f"[Pair] ✅ Number {account} is ONLINE!")
             came_online = True
             break
 
@@ -2488,6 +2545,7 @@ def _pair_bg(user_id: int, account: str):
         elapsed += interval
 
     if not came_online:
+        log.error(f"[Pair] ❌ Timeout - {account} didn't come online within 2 hours")
         with get_db() as db:
             is_postgres = DATABASE_URL is not None
             if is_postgres:
@@ -2498,15 +2556,19 @@ def _pair_bg(user_id: int, account: str):
         _edit(f"⏰ {country_flag} Timeout — `{account}` didn't come online within 2 hours")
         return
 
+    log.info(f"[Pair] Registering number {account} on platform...")
     ok, reg_msg = api_addwsnumber(account)
     log.info(f"[Pair] addwsnumber {account}: ok={ok} msg={reg_msg}")
 
+    log.info(f"[Pair] Getting wsid for {account}...")
     wsid = None
     time.sleep(3)
     for attempt in range(6):
         wsid = api_get_wsid(account)
         if wsid:
+            log.info(f"[Pair] ✅ Got wsid={wsid} on attempt {attempt+1}")
             break
+        log.info(f"[Pair] Attempt {attempt+1} to get wsid failed")
         time.sleep(4)
 
     if wsid:
@@ -2522,9 +2584,10 @@ def _pair_bg(user_id: int, account: str):
         with pairs_lock:
             if account in active_pairs:
                 active_pairs[account].update({"status": "online", "wsid": wsid})
+        log.info(f"[Pair] ✅ Successfully registered {account} with wsid={wsid}")
         _edit(f"✅ {country_flag} `{account}` online! Ready to earn.")
-        log.info(f"[Pair] ✅ Online {account} wsid={wsid}")
     else:
+        log.error(f"[Pair] ❌ Failed to get wsid for {account}")
         with get_db() as db:
             is_postgres = DATABASE_URL is not None
             if is_postgres:
@@ -2535,8 +2598,6 @@ def _pair_bg(user_id: int, account: str):
             if account in active_pairs:
                 active_pairs[account]["status"] = "error"
         _edit(f"⚠️ {country_flag} `{account}` connected but couldn't register on platform. Use *Reauthorize* to retry.")
-
-
 
 
 def get_country_flag(number_or_code: str) -> str:
