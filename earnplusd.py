@@ -5769,11 +5769,12 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     for i, r in enumerate(rows, 1):
         username = r["username"]
-        # Mask username for privacy (show first 2 chars + last char)
+        # Mask username for privacy and escape Markdown special chars
         if len(username) > 4:
             masked_name = username[:2] + "***" + username[-1]
         else:
             masked_name = username
+        masked_name = masked_name.replace("_", "\\_").replace("*", "\\*")
         
         # Medal emojis for top 3
         if i == 1:
@@ -5819,7 +5820,7 @@ async def leaderboard_alltime(update: Update, context: ContextTypes.DEFAULT_TYPE
                 FROM users u
                 LEFT JOIN transactions t ON u.id = t.user_id
                 GROUP BY u.id, u.username
-                HAVING total_earned > 0
+                HAVING COALESCE(SUM(CASE WHEN t.type = 'earn' THEN t.amount ELSE 0 END), 0) > 0
                 ORDER BY total_earned DESC
                 LIMIT 20
             """).fetchall()
@@ -5856,8 +5857,8 @@ async def leaderboard_alltime(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     
     # Build leaderboard
-    text = f"🏆 *All-Time Top Earners*\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    text = "🏆 *All-Time Top Earners*\n"
+    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     
     for i, r in enumerate(rows, 1):
         username = r["username"]
