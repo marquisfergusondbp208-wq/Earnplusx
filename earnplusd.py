@@ -679,22 +679,25 @@ def _admin_log(db, admin_id, action, target=None, detail=None):
                    (admin_id, action, str(target) if target else None, detail))
 
 def _increment_daily_msgs(db, user_id: int, count: int = 1):
-    """Increment daily message count for user (FIXED: SQLite syntax)"""
+    """Increment daily message count for user (resets at midnight UTC)"""
     today = datetime.utcnow().strftime("%Y-%m-%d")
     is_postgres = DATABASE_URL is not None
+    
     if is_postgres:
-        db.execute(
-            "INSERT INTO daily_msgs(user_id, date, msgs_count) VALUES(%s, %s, %s) "
-            "ON CONFLICT(user_id, date) DO UPDATE SET msgs_count = daily_msgs.msgs_count + %s",
-            (user_id, today, count, count)
-        )
+        db.execute("""
+            INSERT INTO daily_msgs(user_id, date, msgs_count) 
+            VALUES(%s, %s, %s) 
+            ON CONFLICT(user_id, date) 
+            DO UPDATE SET msgs_count = daily_msgs.msgs_count + %s
+        """, (user_id, today, count, count))
     else:
-        # ✅ FIXED: Use excluded.msgs_count for SQLite (was: msgs_count=msgs_count+?)
-        db.execute(
-            "INSERT INTO daily_msgs(user_id, date, msgs_count) VALUES(?,?,?) "
-            "ON CONFLICT(user_id, date) DO UPDATE SET msgs_count = excluded.msgs_count + ?",
-            (user_id, today, count, count)
-        )
+        # FIXED: SQLite should use msgs_count + ? not excluded.msgs_count + ?
+        db.execute("""
+            INSERT INTO daily_msgs(user_id, date, msgs_count) 
+            VALUES(?, ?, ?) 
+            ON CONFLICT(user_id, date) 
+            DO UPDATE SET msgs_count = msgs_count + ?
+        """, (user_id, today, count, count))
 
 def init_db():
     # We need a fresh connection for initialization to handle transactions properly
@@ -3917,17 +3920,19 @@ main_keyboard = ReplyKeyboardMarkup([
     [
         KeyboardButton("⚡ Hourly Status", style="primary"),
         KeyboardButton("✉️ Send All", style="success"),
-        KeyboardButton("🏆 Leaderboard", style="primary")
+        KeyboardButton("🏆 Daily LB", style="primary")
     ],
     [
+        KeyboardButton("🏆 All-Time LB", style="primary"),
         KeyboardButton("💸 Withdraw", style="danger"),
-        KeyboardButton("📜 Withdrawal History", style="primary"),
         KeyboardButton("🔗 Referral", style="success")
     ],
     [
+        KeyboardButton("📜 Withdrawal History", style="primary"),
         KeyboardButton("⚙️ Settings", style="primary")
     ]
 ], resize_keyboard=True)
+
 admin_extra_keyboard = ReplyKeyboardMarkup([
     ["👑 Admin Panel"]
 ], resize_keyboard=True)
@@ -4264,8 +4269,8 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 *Balance:* `{pts_bal:,}` pts\n"
         f"   ≈ ₦{naira_bal:,.2f}\n\n"
         f"📈 *Today's earnings:* `{int(stats['today_earn'] or 0):,}` pts (≈ ₦{naira_today:,.2f})\n"
+        f"🏆 *All-Time Total:* `{int(stats['total_earn'] or 0):,}` pts (≈ ₦{naira_total:,.2f})\n"
         f"👥 *Today's referral:* `{int(stats['today_ref'] or 0):,}` pts\n"
-        f"🏆 *Total earned:* `{int(stats['total_earn'] or 0):,}` pts (≈ ₦{naira_total:,.2f})\n\n"
         f"📱 *Online numbers:* `{online}`\n"
         f"✉️ *Messages today:* `{stats['msgs_today']}`\n"
         f"📬 *Total messages:* `{stats['total_msgs']}`\n"
@@ -5558,6 +5563,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Count successes
                 total_sent = sum(r["success"] for r in per_num_results.values())
                 total_earned_pts = total_sent * ppm
+                naira_earned = pts_to_ngn(total_earned_pts)
 
                 if total_sent > 0:
                     with get_db() as db:
@@ -5570,26 +5576,38 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         u = db.execute("SELECT referred_by FROM users WHERE id=?", (uid,)).fetchone()
                         if u and u["referred_by"]:
                             bonus = max(1, int(total_earned_pts * float(get_setting("referral_pct", "5")) / 100))
-                            # ✅ FIXED: Changed type from "referral" to "earn" for consistency
                             _credit(db, u["referred_by"], bonus, f"Ref bonus from uid={uid}", "earn")
                         new_bal = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()["balance"]
 
-                    naira_earned = pts_to_ngn(total_earned_pts)
-                    final_text = (
-                        f"✅ Sent {total_sent} messages simultaneously!\n"
-                        f"💎 Earned {total_earned_pts:,} pts (≈ ₦{naira_earned:.2f})\n"
-                        f"💰 Balance: {new_bal:,} pts"
+                    # ✅ WACASH CLEAN SUMMARY
+                    summary = (
+                        f"✅ SMS Send Completed Successfully! ✔️\n\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"📱 Total Numbers     : {len(rows)}\n"
+                        f"📥 Successfully Sent : {total_sent}\n"
+                        f"💰 Total Earnings    : ₦{naira_earned:.2f}\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"Thank you for using EarnPlus"
                     )
-                    await msg.edit_text(final_text, parse_mode="Markdown")
+                    await msg.edit_text(summary, parse_mode="Markdown")
                 else:
-                    await msg.edit_text("⚠️ No messages were delivered. Please verify that your numbers are online and retry.", parse_mode="Markdown")
+                    await msg.edit_text(
+                        f"❌ SMS Send Failed\n\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"📱 Total Numbers     : {len(rows)}\n"
+                        f"📥 Successfully Sent : 0\n"
+                        f"💰 Total Earnings    : ₦0.00\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"Please verify your numbers are online and retry.",
+                        parse_mode="Markdown"
+                    )
 
             except Exception as e:
                 log.error(f"Background send_all error: {e}")
                 await msg.edit_text(f"❌ An error occurred: {str(e)[:100]}", parse_mode="Markdown")
 
         asyncio.create_task(background_send())
-        await update.message.reply_text("🚀 Sending started simultaneously! You will receive the result here shortly.")
+        # ✅ Removed extra "Sending started" message - user only sees spinner then summary
         return
     
     # ============ MANUAL MODE - TRUE SIMULTANEOUS SENDING ============
@@ -5642,22 +5660,7 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Calculate totals
         total_sent = sum(1 for r in results.values() if r.get("success", False))
         total_earned_pts = total_sent * ppm
-        
-        # Build per-number results summary
-        summary_lines = []
-        success_count = 0
-        fail_count = 0
-        
-        for acct, r in results.items():
-            if r.get("success", False):
-                success_count += 1
-                summary_lines.append(f"✅ `{acct}` — Sent")
-            else:
-                fail_count += 1
-                error_text = f" - {r.get('error', 'Unknown error')}" if r.get("error") else ""
-                summary_lines.append(f"❌ `{acct}` — Failed{error_text}")
-        
-        summary = "\n".join(summary_lines)
+        ngn_earned = pts_to_ngn(total_earned_pts)
         
         if total_sent > 0:
             with get_db() as db:
@@ -5672,57 +5675,190 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 u = db.execute("SELECT referred_by FROM users WHERE id=?", (uid,)).fetchone()
                 if u and u["referred_by"]:
                     bonus = max(1, int(total_earned_pts * float(get_setting("referral_pct", "5")) / 100))
-                    # ✅ FIXED: Changed type from "referral" to "earn" for consistency
                     _credit(db, u["referred_by"], bonus, f"Ref bonus from uid={uid}", "earn")
                 new_bal = db.execute("SELECT balance FROM users WHERE id=?", (uid,)).fetchone()["balance"]
             
-            ngn_earned = pts_to_ngn(total_earned_pts)
-            
-            await msg.edit_text(
-                f"✅ *Send Complete!*\n\n"
-                f"📤 Sent: `{total_sent}` / `{num_count}` messages\n"
-                f"💎 Earned: `{total_earned_pts:,}` pts\n"
-                f"💵 ≈ ₦{ngn_earned:.2f}\n"
-                f"💰 New balance: `{new_bal:,}` pts\n\n"
-                f"*Results:*\n{summary}",
-                parse_mode="Markdown"
+            # ✅ MANUAL CLEAN SUMMARY (no per-number details)
+            summary = (
+                f"✅ SMS Send Completed Successfully! ✔️\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📱 Total Numbers     : {num_count}\n"
+                f"📥 Successfully Sent : {total_sent}\n"
+                f"💰 Total Earnings    : ₦{ngn_earned:.2f}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Thank you for using EarnPlus"
             )
+            await msg.edit_text(summary, parse_mode="Markdown")
         else:
             await msg.edit_text(
-                f"❌ *Send Failed*\n\n"
-                f"0 messages sent.\n\n"
-                f"*Results:*\n{summary}",
+                f"❌ SMS Send Failed\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📱 Total Numbers     : {num_count}\n"
+                f"📥 Successfully Sent : 0\n"
+                f"💰 Total Earnings    : ₦0.00\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Please check your numbers and try again.",
                 parse_mode="Markdown"
             )
     
     # Start the background task
     asyncio.create_task(background_send())
-    await update.message.reply_text(
-        f"🚀 **Sending started simultaneously to {num_count} number(s)!**\n"
-        f"You'll get the results shortly.",
-        parse_mode="Markdown"
-    )
+    # ✅ No extra message - user only sees spinner then final summary
     return
 
 # Leaderboard
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    period = "daily"
+    """Show daily leaderboard - resets at midnight (UTC)"""
     today = datetime.utcnow().strftime("%Y-%m-%d")
+    is_postgres = DATABASE_URL is not None
+    
     with get_db() as db:
-        if period == "daily":
-            rows = db.execute(
-                "SELECT u.username, COALESCE(dm.msgs_count,0) as msgs_today FROM daily_msgs dm JOIN users u ON dm.user_id=u.id WHERE dm.date=? AND dm.msgs_count>0 ORDER BY dm.msgs_count DESC LIMIT 20",
-                (today,)).fetchall()
-            total_msgs = db.execute("SELECT COALESCE(SUM(msgs_count),0) as s FROM daily_msgs WHERE date=?", (today,)).fetchone()["s"]
+        # Get top 20 users by messages sent today
+        if is_postgres:
+            rows = db.execute("""
+                SELECT u.username, COALESCE(dm.msgs_count, 0) as msgs_today 
+                FROM daily_msgs dm 
+                JOIN users u ON dm.user_id = u.id 
+                WHERE dm.date = CURRENT_DATE
+                AND dm.msgs_count > 0 
+                ORDER BY dm.msgs_count DESC 
+                LIMIT 20
+            """).fetchall()
         else:
-            rows = []
-            total_msgs = 0
+            rows = db.execute("""
+                SELECT u.username, COALESCE(dm.msgs_count, 0) as msgs_today 
+                FROM daily_msgs dm 
+                JOIN users u ON dm.user_id = u.id 
+                WHERE dm.date = date('now')
+                AND dm.msgs_count > 0 
+                ORDER BY dm.msgs_count DESC 
+                LIMIT 20
+            """).fetchall()
+        
+        # Get total messages sent today
+        if is_postgres:
+            total_msgs = db.execute(
+                "SELECT COALESCE(SUM(msgs_count), 0) as s FROM daily_msgs WHERE date = CURRENT_DATE"
+            ).fetchone()["s"]
+        else:
+            total_msgs = db.execute(
+                "SELECT COALESCE(SUM(msgs_count), 0) as s FROM daily_msgs WHERE date = date('now')"
+            ).fetchone()["s"]
+    
     if not rows:
-        await update.message.reply_text("No activity today. Send messages to appear on the leaderboard!")
+        # Calculate time until reset even when no activity
+        from datetime import timedelta
+        reset_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        time_until = reset_time - datetime.utcnow()
+        hours = time_until.seconds // 3600
+        minutes = (time_until.seconds % 3600) // 60
+        
+        await update.message.reply_text(
+            f"📊 *No activity today*\n\n"
+            f"Send messages to appear on the leaderboard!\n"
+            f"The leaderboard resets every day at 12:00 AM UTC.\n\n"
+            f"🔄 Resets in {hours}h {minutes}m",
+            parse_mode="Markdown"
+        )
         return
     
-    # Build text WITHOUT Markdown special characters that could break parsing
-    text = f"🏆 Daily Leaderboard ({today})\n\n"
+    # Build leaderboard
+    text = f"🏆 *Daily Leaderboard*\n"
+    text += f"📅 {today}\n"
+    text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    for i, r in enumerate(rows, 1):
+        username = r["username"]
+        # Mask username for privacy (show first 2 chars + last char)
+        if len(username) > 4:
+            masked_name = username[:2] + "***" + username[-1]
+        else:
+            masked_name = username
+        
+        # Medal emojis for top 3
+        if i == 1:
+            medal = "🥇"
+        elif i == 2:
+            medal = "🥈"
+        elif i == 3:
+            medal = "🥉"
+        else:
+            medal = f"{i}."
+        
+        text += f"{medal} {masked_name} — {r['msgs_today']} msgs\n"
+    
+    # Calculate time until reset
+    from datetime import timedelta
+    reset_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    time_until = reset_time - datetime.utcnow()
+    hours = time_until.seconds // 3600
+    minutes = (time_until.seconds % 3600) // 60
+    
+    text += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"📊 Total messages today: {total_msgs}\n"
+    text += f"🔄 Resets in {hours}h {minutes}m (UTC midnight)"
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+    
+async def leaderboard_alltime(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show all-time top earners (total points earned)"""
+    telegram_id = update.effective_user.id
+    uid = get_internal_user_id(telegram_id)
+    if not uid:
+        await update.message.reply_text("Please use /start first.")
+        return
+    
+    with get_db() as db:
+        is_postgres = DATABASE_URL is not None
+        
+        # Get top 20 users by total earnings
+        if is_postgres:
+            rows = db.execute("""
+                SELECT u.username, 
+                       COALESCE(SUM(CASE WHEN t.type = 'earn' THEN t.amount ELSE 0 END), 0) as total_earned
+                FROM users u
+                LEFT JOIN transactions t ON u.id = t.user_id
+                GROUP BY u.id, u.username
+                HAVING total_earned > 0
+                ORDER BY total_earned DESC
+                LIMIT 20
+            """).fetchall()
+            
+            total_all_time = db.execute("""
+                SELECT COALESCE(SUM(amount), 0) as s 
+                FROM transactions 
+                WHERE type = 'earn'
+            """).fetchone()["s"]
+        else:
+            rows = db.execute("""
+                SELECT u.username, 
+                       COALESCE(SUM(CASE WHEN t.type = 'earn' THEN t.amount ELSE 0 END), 0) as total_earned
+                FROM users u
+                LEFT JOIN transactions t ON u.id = t.user_id
+                GROUP BY u.id, u.username
+                HAVING total_earned > 0
+                ORDER BY total_earned DESC
+                LIMIT 20
+            """).fetchall()
+            
+            total_all_time = db.execute("""
+                SELECT COALESCE(SUM(amount), 0) as s 
+                FROM transactions 
+                WHERE type = 'earn'
+            """).fetchone()["s"]
+    
+    if not rows:
+        await update.message.reply_text(
+            "🏆 *No earners yet*\n\n"
+            "Start earning points to appear on the all-time leaderboard!",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Build leaderboard
+    text = f"🏆 *All-Time Top Earners*\n"
+    text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
     for i, r in enumerate(rows, 1):
         username = r["username"]
         # Mask username for privacy
@@ -5730,11 +5866,26 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             masked_name = username[:2] + "***" + username[-1]
         else:
             masked_name = username
-        text += f"{i}. {masked_name} — {r['msgs_today']} msgs\n"
-    text += f"\n📊 Total messages today: {total_msgs}"
+        
+        # Medal emojis for top 3
+        if i == 1:
+            medal = "🥇"
+        elif i == 2:
+            medal = "🥈"
+        elif i == 3:
+            medal = "🥉"
+        else:
+            medal = f"{i}."
+        
+        pts = int(r["total_earned"] or 0)
+        ngn = pts_to_ngn(pts)
+        text += f"{medal} {masked_name} — {pts:,} pts (≈ ₦{ngn:,.2f})\n"
     
-    # Use parse_mode=None to avoid Markdown issues
-    await update.message.reply_text(text, parse_mode=None)
+    total_ngn = pts_to_ngn(int(total_all_time))
+    text += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"📊 Total all-time earnings: {int(total_all_time):,} pts (≈ ₦{total_ngn:,.2f})"
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 # Check-in (FIXED: Credit points, not NGN)
 async def check_in(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9009,7 +9160,10 @@ def main():
     application.add_handler(add_number_conv)
     application.add_handler(MessageHandler(filters.Regex("^📞 My Numbers$"), my_numbers))
     application.add_handler(MessageHandler(filters.Regex("^✉️ Send All$"), send_all))
-    application.add_handler(MessageHandler(filters.Regex("^🏆 Leaderboard$"), leaderboard))
+    # ============ UPDATED LEADERBOARD HANDLERS ============
+    application.add_handler(MessageHandler(filters.Regex("^🏆 Daily LB$"), leaderboard))        # Daily leaderboard
+    application.add_handler(MessageHandler(filters.Regex("^🏆 All-Time LB$"), leaderboard_alltime))  # All-time leaderboard
+    # =======================================================
     application.add_handler(MessageHandler(filters.Regex("^🎁 Check-in$"), check_in))
     application.add_handler(withdraw_conv)
     application.add_handler(MessageHandler(filters.Regex("^📜 Withdrawal History$"), withdrawal_history))
@@ -9019,7 +9173,7 @@ def main():
     # ── Smart catch-all: tries direct number first, falls through to settings ──
     # handle_direct_number internally calls handle_settings_input for non-numbers
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^[➕💰📞✉️🏆🎁💸🔗⚙️👑⚡]"),
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^[➕💰📞✉️🏆🎁💸🔗⚙️👑⚡📜]"),
         handle_direct_number
     ))
     
@@ -9041,10 +9195,12 @@ def main():
     application.add_handler(MessageHandler(filters.Regex("^⚡ Hourly Status$"), hourly_status))
     application.add_handler(CommandHandler("hourly", hourly_status), group=-1)
     application.add_handler(CommandHandler("fix_user_mode", fix_user_mode), group=-1)
+    # ============ COMMAND HANDLERS ============
+    application.add_handler(CommandHandler("leaderboard_alltime", leaderboard_alltime), group=-1)
     application.add_handler(CommandHandler("checkdb", check_db), group=-1)
     application.add_handler(CommandHandler("debugenv", debug_env), group=-1)
-    # ✅ FIXED: Added audit_balances command
     application.add_handler(CommandHandler("audit_balances", audit_balances), group=-1)
+    # ===========================================
     
     # WSJOBS (Hourly Mode) commands
     application.add_handler(CommandHandler("set_wsjobs", set_wsjobs_command), group=-1)
