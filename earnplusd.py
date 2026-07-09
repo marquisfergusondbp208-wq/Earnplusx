@@ -116,6 +116,43 @@ logging.basicConfig(
 )
 log = logging.getLogger("earnplus_bot")
 
+
+# ============ TELEGRAM HELPER FUNCTIONS ============
+# These MUST be defined before any background threads use them
+
+async def send_telegram(chat_id: int, text: str, parse_mode: str = None, reply_markup=None):
+    """Send a Telegram message asynchronously."""
+    global _application
+    try:
+        if _application and _application.bot:
+            await _application.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup
+            )
+        else:
+            log.error("Application bot not available")
+    except Exception as e:
+        log.error(f"Failed to send Telegram message: {e}")
+
+async def edit_telegram_message(message, text: str, parse_mode: str = None, reply_markup=None):
+    """Edit a Telegram message asynchronously."""
+    global _application
+    try:
+        if _application and _application.bot:
+            await _application.bot.edit_message_text(
+                chat_id=message.chat_id,
+                message_id=message.message_id,
+                text=text,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup
+            )
+        else:
+            log.error("Application bot not available")
+    except Exception as e:
+        log.error(f"Failed to edit Telegram message: {e}")
+        
 # ----------------------------------------------------------------------
 # Global variables for platform session and active pairs
 # ----------------------------------------------------------------------
@@ -8571,13 +8608,6 @@ async def show_wsjobs_settings(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     else:
         await update.message.reply_text("❌ No WSJOBS credentials found in database!\nUse `/set_wsjobs <username> <password>` to set them.")
-
-async def update_spinner_message(msg, new_text: str):
-    """Lightweight edit helper for messages outside the spinner system."""
-    try:
-        await msg.edit_text(f"⏳  {new_text}", parse_mode="Markdown")
-    except Exception:
-        pass
 
 
 # ============ SESSION KEEPALIVE (Required for platform session) ============
