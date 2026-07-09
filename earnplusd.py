@@ -5510,6 +5510,41 @@ async def delnums_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Send All
 # Send All
+# ============ ADD THIS FUNCTION BEFORE send_all ============
+def verify_and_clean_offline_numbers(uid: int, accounts: list):
+    """
+    Check if numbers are still online on the platform.
+    If a number is offline, quietly remove it from the user's account.
+    Returns the list of numbers that were removed.
+    """
+    removed = []
+    
+    for account in accounts:
+        # Check phone status on platform
+        status = api_phonestatus(account)
+        
+        # If status is None or 0 (offline), remove it
+        if status != 1:
+            with get_db() as db:
+                # Check which table to delete from based on mode
+                mode = get_earning_mode()
+                if mode == "auto":
+                    db.execute("DELETE FROM auto_numbers WHERE user_id=? AND account=?", (uid, account))
+                elif mode == "wacash":
+                    db.execute("DELETE FROM wacash_numbers WHERE user_id=? AND account=?", (uid, account))
+                else:
+                    db.execute("DELETE FROM numbers WHERE user_id=? AND account=?", (uid, account))
+                
+                # Also remove from pending tasks if in auto mode
+                if mode == "auto":
+                    db.execute("DELETE FROM pending_tasks WHERE user_id=? AND account=?", (uid, account))
+            
+            removed.append(account)
+            log.info(f"[Cleanup] Removed offline number {account} for user {uid}")
+    
+    return removed
+
+# ============ UPDATED send_all FUNCTION ============
 async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = update.effective_user.id
     uid = get_internal_user_id(telegram_id)
@@ -5559,6 +5594,27 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     # Wait for all to complete
                     await asyncio.gather(*futures, return_exceptions=True)
+
+                # ============ ADD THIS: Verify and clean offline wacash numbers ============
+                def wacash_verify_and_clean(uid, accounts):
+                    removed = []
+                    online_numbers = wacash_get_online()
+                    online_set = {str(n.get("wsAppNo", "")).replace("+", "").replace(" ", "").strip() for n in online_numbers}
+                    
+                    for account in accounts:
+                        clean_account = account.replace("+", "").replace(" ", "").strip()
+                        if clean_account not in online_set:
+                            with get_db() as db:
+                                db.execute("DELETE FROM wacash_numbers WHERE user_id=? AND account=?", (uid, account))
+                            removed.append(account)
+                            log.info(f"[Cleanup] Removed offline wacash number {account} for user {uid}")
+                    return removed
+                
+                all_accounts = [r["account"] for r in rows]
+                removed = await loop.run_in_executor(None, wacash_verify_and_clean, uid, all_accounts)
+                if removed:
+                    log.info(f"[Cleanup] Removed {len(removed)} offline wacash numbers for user {uid}")
+                # ================================================================
 
                 # Count successes
                 total_sent = sum(r["success"] for r in per_num_results.values())
@@ -5657,6 +5713,13 @@ async def send_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Wait for ALL to complete
             await asyncio.gather(*futures, return_exceptions=True)
         
+        # ============ ADD THIS: Verify and clean offline manual numbers ============
+        all_accounts = [r["account"] for r in rows]
+        removed = await loop.run_in_executor(None, verify_and_clean_offline_numbers, uid, all_accounts)
+        if removed:
+            log.info(f"[Cleanup] Removed {len(removed)} offline manual numbers for user {uid}")
+        # ================================================================
+
         # Calculate totals
         total_sent = sum(1 for r in results.values() if r.get("success", False))
         total_earned_pts = total_sent * ppm
