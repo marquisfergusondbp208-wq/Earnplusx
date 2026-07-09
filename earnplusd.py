@@ -57,6 +57,11 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ConversationHandler, ContextTypes
 )
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    InputFile, CopyTextButton  # ← ADD CopyTextButton here
+)
 
 # Global variables for bot
 _application = None
@@ -2469,16 +2474,20 @@ def _pair_bg(user_id: int, account: str):
             l_prt = _ap.get("local_part")
         next_variant = _next_number_variant(orig, account, c_pfx, l_prt)
 
-        # ✅ FIX: Use callback_data instead of copy_text
+        # ✅ CORRECT: Use CopyTextButton for native clipboard copy
         pair_code_str = str(pair_code).strip()
+        log.info(f"[Pair] Sending pairing code to user: {pair_code_str}")
+
         btn_rows = [
-            [InlineKeyboardButton("📋 Copy Pairing Code", callback_data=f"copy_{pair_code_str}")],
+            [InlineKeyboardButton(
+                "📋 Copy Pairing Code",
+                copy_text=CopyTextButton(text=pair_code_str)  # ← Native clipboard copy
+            )],
         ]
         if next_variant:
             btn_rows.append([InlineKeyboardButton("➡️ Next Pairing Code", callback_data=f"linkagain_{orig}__{next_variant}")])
         btn_rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"delnum_{account}")])
 
-        log.info(f"[Pair] Sending pairing code to user: {pair_code_str}")
         _edit(
             f"🔐 {country_flag} Pairing Code sent successfully\n`{account}`.\n\n**Code: `{pair_code_str}`**",
             InlineKeyboardMarkup(btn_rows)
@@ -2529,11 +2538,13 @@ def _pair_bg(user_id: int, account: str):
         if elapsed - last_update >= 120:
             remaining = max(0, (7200 - elapsed) // 60)
             log.info(f"[Pair] Status update: {remaining}m remaining for {account}")
-            # ✅ FIX: Also use callback_data here
             _edit(
                 f"⏳ {country_flag} Waiting for `{account}` to come online… _{remaining}m left_",
                 InlineKeyboardMarkup([
-                    [InlineKeyboardButton("📋 Copy Pairing Code", callback_data=f"copy_{pair_code_str}")],
+                    [InlineKeyboardButton(
+                        "📋 Copy Pairing Code",
+                        copy_text=CopyTextButton(text=pair_code_str)  # ← Native clipboard copy
+                    )],
                     [InlineKeyboardButton("❌ Cancel", callback_data=f"delnum_{account}")]
                 ])
             )
@@ -2591,6 +2602,37 @@ def _pair_bg(user_id: int, account: str):
                 active_pairs[account].update({"status": "online", "wsid": wsid})
         log.info(f"[Pair] ✅ Successfully registered {account} with wsid={wsid}")
         _edit(f"✅ {country_flag} `{account}` online! Ready to earn.")
+
+        # ── AUTO-START NEXT VARIANT ──────────────────────────────────────────
+        with pairs_lock:
+            _ap = active_pairs.get(account, {})
+            orig = _ap.get("original", account)
+            c_pfx = _ap.get("country_prefix")
+            l_prt = _ap.get("local_part")
+        
+        next_variant = _next_number_variant(orig, account, c_pfx, l_prt)
+        if next_variant:
+            log.info(f"[Pair] 🚀 Auto-starting next variant: {next_variant}")
+            # Check if already in DB
+            with get_db() as db:
+                is_postgres = DATABASE_URL is not None
+                if is_postgres:
+                    existing = db.execute("SELECT id FROM numbers WHERE user_id=%s AND account=%s", (user_id, next_variant)).fetchone()
+                else:
+                    existing = db.execute("SELECT id FROM numbers WHERE user_id=? AND account=?", (user_id, next_variant)).fetchone()
+                if not existing:
+                    if is_postgres:
+                        db.execute("INSERT INTO numbers(user_id, account, status) VALUES(%s,%s,'pairing')", (user_id, next_variant))
+                    else:
+                        db.execute("INSERT INTO numbers(user_id, account, status) VALUES(?,?,'pairing')", (user_id, next_variant))
+            
+            with pairs_lock:
+                active_pairs[next_variant] = {
+                    "user_id": user_id, "pair_code": None, "status": "pairing",
+                    "wsid": None, "cancelled": False, "original": orig,
+                    "country_prefix": c_pfx, "local_part": l_prt,
+                }
+            threading.Thread(target=_pair_bg, args=(user_id, next_variant), daemon=True).start()
     else:
         log.error(f"[Pair] ❌ Failed to get wsid for {account}")
         with get_db() as db:
