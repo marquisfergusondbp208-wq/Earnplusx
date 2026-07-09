@@ -63,7 +63,13 @@ _application = None
 _bot_loop = None
 _offline_pending = {}
 _OFFLINE_CONFIRM_SEC = 120
-HOURY_VARIANTS_ENABLED = True  # <-- ADD THIS LINE
+HOURY_VARIANTS_ENABLED = True
+
+# ============ TELEGRAM WORKER CONFIGURATION ============
+WORKER_SESSION = os.environ.get("WORKER_TG_SESSION", "")
+WORKER_API_ID = int(os.environ.get("WORKER_API_ID", "32641409"))
+WORKER_API_HASH = os.environ.get("WORKER_API_HASH", "38e7fff1f07ccd5c762af27d1d22b9c2")
+WORKER_TARGET = "@WStaskbot"
 # Configuration
 # ----------------------------------------------------------------------
 BASE_URL = os.getenv("BASE_URL", "https://api.wsjobs-ng.com")
@@ -129,6 +135,7 @@ _wacash_fire_lock = threading.Lock()
 # Pair status message tracking (for edit-in-place pairing code delivery)
 _pair_status_msgs: dict = {}   # account → telegram message_id
 _pair_status_lock = threading.Lock()
+
 
 # ============ OPTIMIZED DATABASE CONNECTION POOL ============
 import threading
