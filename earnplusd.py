@@ -2469,16 +2469,18 @@ def _pair_bg(user_id: int, account: str):
             l_prt = _ap.get("local_part")
         next_variant = _next_number_variant(orig, account, c_pfx, l_prt)
 
+        # ✅ FIX: Use callback_data instead of copy_text
+        pair_code_str = str(pair_code).strip()
         btn_rows = [
-            [InlineKeyboardButton("📋 Copy Pairing Code", copy_text=pair_code)],
+            [InlineKeyboardButton("📋 Copy Pairing Code", callback_data=f"copy_{pair_code_str}")],
         ]
         if next_variant:
             btn_rows.append([InlineKeyboardButton("➡️ Next Pairing Code", callback_data=f"linkagain_{orig}__{next_variant}")])
         btn_rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"delnum_{account}")])
 
-        log.info(f"[Pair] Sending pairing code to user: {pair_code}")
+        log.info(f"[Pair] Sending pairing code to user: {pair_code_str}")
         _edit(
-            f"🔐 {country_flag} Pairing Code sent successfully\n`{account}`.",
+            f"🔐 {country_flag} Pairing Code sent successfully\n`{account}`.\n\n**Code: `{pair_code_str}`**",
             InlineKeyboardMarkup(btn_rows)
         )
     else:
@@ -2527,10 +2529,13 @@ def _pair_bg(user_id: int, account: str):
         if elapsed - last_update >= 120:
             remaining = max(0, (7200 - elapsed) // 60)
             log.info(f"[Pair] Status update: {remaining}m remaining for {account}")
+            # ✅ FIX: Also use callback_data here
             _edit(
                 f"⏳ {country_flag} Waiting for `{account}` to come online… _{remaining}m left_",
-                InlineKeyboardMarkup([[InlineKeyboardButton("📋 Copy Pairing Code", copy_text=pair_code)],
-                                      [InlineKeyboardButton("❌ Cancel", callback_data=f"delnum_{account}")]])
+                InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 Copy Pairing Code", callback_data=f"copy_{pair_code_str}")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data=f"delnum_{account}")]
+                ])
             )
             last_update = elapsed
 
@@ -5194,6 +5199,27 @@ async def number_action_callback(update: Update, context: ContextTypes.DEFAULT_T
     if not uid:
         await query.edit_message_text("Please use /start to register before proceeding.")
         return
+    
+    # ✅ ADD THIS: Handle copy button callback
+    if data.startswith("copy_"):
+        code = data[5:]  # Remove "copy_" prefix
+        # Show a toast notification that code is shown
+        await query.answer(f"🔑 Code: {code}", show_alert=False)
+        # Edit the message to show the code clearly
+        await query.edit_message_text(
+            f"📋 *Pairing Code*\n\n"
+            f"🔑 `{code}`\n\n"
+            f"*Steps to link:*\n"
+            f"1️⃣ Open WhatsApp\n"
+            f"2️⃣ Go to Settings → Linked Devices\n"
+            f"3️⃣ Tap Link a Device\n"
+            f"4️⃣ Select *Link with phone number*\n"
+            f"5️⃣ Enter the code above\n\n"
+            f"⏳ Code expires in ~2 minutes. Act fast!",
+            parse_mode="Markdown"
+        )
+        return
+    
     if data.startswith("delnum_"):
         account = data[7:]
         mode = get_earning_mode()
@@ -5212,7 +5238,9 @@ async def number_action_callback(update: Update, context: ContextTypes.DEFAULT_T
             with get_db() as db:
                 db.execute("DELETE FROM numbers WHERE user_id=? AND account=?", (uid, account))
         await query.edit_message_text(f"✅ `{account}` has been removed from your account.")
-    elif data.startswith("reauthnum_"):
+        return
+    
+    if data.startswith("reauthnum_"):
         account = data[10:]
         mode = get_earning_mode()
         if mode == "wacash":
@@ -5268,15 +5296,18 @@ async def number_action_callback(update: Update, context: ContextTypes.DEFAULT_T
                 threading.Thread(target=_pair_hourly_bg, args=(uid, account), daemon=True).start()
             else:
                 threading.Thread(target=_pair_bg, args=(uid, account), daemon=True).start()
+        return
 
-    elif data.startswith("linkagain_"):
+    if data.startswith("linkagain_"):
         # Format: linkagain_{original}__{current_variant}
-        payload  = data[10:]  # strip "linkagain_"
+        payload = data[10:]  # strip "linkagain_"
         if "__" in payload:
             original, account = payload.split("__", 1)
         else:
             original = payload
-            account  = payload
+            account = payload
+
+        log.info(f"[Callback] linkagain: original={original}, account={account}")
 
         # Cancel any active pairing on the old number
         with pairs_lock:
@@ -5319,6 +5350,7 @@ async def number_action_callback(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode="Markdown"
         )
         threading.Thread(target=_pair_bg, args=(uid, account), daemon=True).start()
+        return
 
 
 # ── Shared delete helper (used by both inline button and slash commands) ────────
