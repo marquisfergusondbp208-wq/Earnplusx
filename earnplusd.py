@@ -73,23 +73,24 @@ WORKER_TARGET = "@WStaskbot"
 # Configuration
 # ----------------------------------------------------------------------
 BASE_URL = os.getenv("BASE_URL", "https://api.wsjobs-ng.com")
-PLATFORM_USER = os.getenv("PLATFORM_USER", "Frankhustle")
-PLATFORM_PASS = os.getenv("PLATFORM_PASS", "f11111")
+PLATFORM_USER = os.getenv("PLATFORM_USER", "Frankhustle")  # ← CHANGE THIS
+PLATFORM_PASS = os.getenv("PLATFORM_PASS", "f11111")       # ← CHANGE THIS
 DB_FILE = os.getenv("DB_FILE", "earnplus_telegram.db")
 SECRET_KEY = os.getenv("SECRET_KEY", "earnplus_bot_secret")
-TOKEN_EXPIRY_H = 72   # not used, kept for legacy
-NGN_PER_POINT = 0.15  # only fallback, actual rates from settings
+TOKEN_EXPIRY_H = 72
+NGN_PER_POINT = 0.15
 MAX_RETRIES = 6
 POLL_INTERVAL = 3
 UA = ("Mozilla/5.0 (Linux; Android 13; V2116 Build/TP1A.220624.014_NONFC) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.7632.120 Mobile Safari/537.36")
 SHARED_SECRET = os.getenv("SHARED_SECRET", "Frankpat1@")
 
-# ADD THIS LINE RIGHT HERE:
-DATABASE_URL = os.getenv("DATABASE_URL")  # Railway auto-injects this
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# WSJOBS (simpletasks234.com) for Hourly Mode
+# WSJOBS (simpletasks88.com) - HARDCODED CREDENTIALS
 WSJOBS_BASE_URL = os.getenv("WSJOBS_BASE_URL", "https://admin.simpletasks88.com")
+WSJOBS_USER = "Frankhustle"      # ← HARDCODE YOUR USERNAME
+WSJOBS_PASS = "f11111"           # ← HARDCODE YOUR PASSWORD
 # DELETE or COMMENT these:
 # TASK4U_USER = os.getenv("TASK4U_USER", "8085816739")
 # TASK4U_PASS_HASH = os.getenv("TASK4U_PASS_HASH", "ead68717fbb2411b902ed9ad8b2c0639")
@@ -1487,16 +1488,25 @@ def should_switch_account(username: str, threshold: int = 110) -> bool:
 # Platform API functions (unchanged from original)
 # ----------------------------------------------------------------------
 def _md5(s): return hashlib.md5(s.encode()).hexdigest()
+
 def _vhdrs():
     vt = str(int(time.time() * 1000))
-    return {"verify-time": vt, "verify-encrypt": _md5("yh123456" + vt)}
+    return {"verify-time": vt, "verify-encrypt": _md5("yh123456" + vt)}  # ← CORRECT PATTERN
+
 def _hdrs(x=None):
-    h = {"Content-Type": "application/json", "User-Agent": UA,
-         "Referer": "https://www.wsjobs-ng.com/", "Origin": "https://www.wsjobs-ng.com",
-         "accept": "application/json, text/plain, */*", "x-requested-with": "mark.via.gp"}
-    h.update(_vhdrs())
-    if x: h.update(x)
+    h = {
+        "Content-Type": "application/json",
+        "User-Agent": UA,
+        "Referer": "https://simpletasks88.com/",
+        "Origin": "https://simpletasks88.com",
+        "accept": "application/json, text/plain, */*",
+        "x-requested-with": "mark.via.gp"
+    }
+    h.update(_vhdrs())  # ← This calls _vhdrs() correctly
+    if x:
+        h.update(x)
     return h
+
 def _s0(p,u,n,tx=""): return _md5(_md5(p)+u+n+tx)
 def _s1(p,u,n,tx=""): return _md5(_md5(p)+tx+u+n)
 def _sa(p,u,n,a,t):   return _md5(_md5(p)+u+n+a+t)
@@ -1527,36 +1537,42 @@ def _retry(fn, label="API", timeout_secs=10):
 
 def platform_login():
     """
-    Login to the active platform (simpletasks88.com via wsjobs_login).
-    Falls back to the legacy BASE_URL login for non-manual platforms.
+    Login to the platform using hardcoded credentials.
+    Uses WSJOBS_BASE_URL (simpletasks88.com) for manual mode.
     """
-    # ── Primary: always try wsjobs (simpletasks88.com) first ──
-    ok = wsjobs_login()
-    if ok:
-        # Mirror wsjobs session into platform_session so legacy callers work
-        with wsjobs_lock:
-            ws = dict(wsjobs_session)
-        with platform_lock:
-            platform_session.update(ws)
-        return True
-
-    # ── Fallback: old BASE_URL platform (wsjobs-ng.com) ──
+    global platform_session
+    
+    # Always use WSJOBS (simpletasks88.com) with hardcoded credentials
     http = requests.Session()
-    pm = _md5(_md5(PLATFORM_PASS))
-    sign = _md5(_md5("/api/user/login") + PLATFORM_USER + pm)
+    username = WSJOBS_USER
+    password = WSJOBS_PASS
+    
+    userpwd = _md5(_md5(password))
+    sign = _md5(_md5("/api/user/login") + username + userpwd)
+    
     try:
-        r = _retry(lambda: http.post(f"{BASE_URL}/api/user/login",
-                   json={"username": PLATFORM_USER, "userpwd": pm, "sign": sign},
-                   headers=_hdrs(), timeout=15), "login")
+        log.info(f"[Platform] Logging in as {username} to {WSJOBS_BASE_URL}")
+        r = _retry(lambda: http.post(
+            f"{WSJOBS_BASE_URL}/api/user/login",
+            json={"username": username, "userpwd": userpwd, "sign": sign},
+            headers=_hdrs(), timeout=15
+        ), "login")
         d = r.json()
         if d.get("code") == 0:
             info = d["data"]["info"]
             with platform_lock:
-                platform_session.update({"userid": info["id"], "username": PLATFORM_USER, "http": http})
-            log.info(f"Platform login OK uid={info['id']}"); return True
-        log.error(f"Login failed: {d.get('message')}"); return False
+                platform_session.update({
+                    "userid": info["id"],
+                    "username": username,
+                    "http": http
+                })
+            log.info(f"[Platform] Login OK uid={info['id']}")
+            return True
+        log.error(f"[Platform] Login failed: {d.get('message')}")
+        return False
     except Exception as e:
-        log.error(f"Login exception: {e}"); return False
+        log.error(f"[Platform] Login exception: {e}")
+        return False
 
 def _ps():
     with platform_lock:
@@ -1617,7 +1633,9 @@ def api_addwsnumber(account, types=1):
         log.error(f"[api_addwsnumber] {e}"); return False, 'Service unavailable'
 
 def api_sendmsg(phone, wsid):
-    s = _m_ps(); uid, uname = str(s["userid"]), s["username"]
+    s = _m_ps()
+    uid, uname = str(s["userid"]), s["username"]
+    # CORRECT: md5(md5("/api/user/sendmsg") + userid + username + str(wsid))
     sign = _wsjobs_md5(_wsjobs_md5("/api/user/sendmsg") + uid + uname + str(wsid))
     try:
         r = _retry(lambda: s["http"].post(f"{WSJOBS_BASE_URL}/api/user/sendmsg",
@@ -1629,7 +1647,8 @@ def api_sendmsg(phone, wsid):
             log.warning(f"[api_sendmsg] {phone}/{wsid}: {d.get('message')}")
         return ok, ("" if ok else d.get("message", "Send failed"))
     except Exception as e:
-        log.error(f"[api_sendmsg] {e}"); return False, "Network timeout"
+        log.error(f"[api_sendmsg] {e}")
+        return False, "Network timeout"
 
 def api_get_wsid(account):
     """Fetch wsid (record id) for a given account from get_appinfo."""
@@ -1755,58 +1774,16 @@ wsjobs_lock = threading.Lock()
 def _wsjobs_md5(s): 
     return hashlib.md5(s.encode()).hexdigest()
 
-def _wsjobs_vhdrs():
-    vt = str(int(time.time() * 1000))
-    return {
-        "verify-time": vt,
-        "verify-encrypt": _wsjobs_md5("yh123456" + vt)
-    }
-
-def _wsjobs_hdrs(x=None):
-    h = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Linux; Android 16; V2361A Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.177 Mobile Safari/537.36",
-        "Referer": "https://simpletasks88.com/",
-        "Origin": "https://simpletasks88.com",
-        "accept": "application/json, text/plain, */*",
-        "x-requested-with": "mark.via.gp"
-    }
-    h.update(_wsjobs_vhdrs())
-    if x: 
-        h.update(x)
-    return h
 
 def wsjobs_login() -> bool:
-    """Login to WSJOBS platform using credentials from active platform account."""
+    """Login to WSJOBS platform using hardcoded credentials."""
     global wsjobs_session
     
-    # Get credentials from active platform account
-    active_account = get_active_platform_account()
+    # Use hardcoded credentials
+    username = WSJOBS_USER
+    password = WSJOBS_PASS
     
-    if active_account:
-        username = active_account["username"]
-        password = active_account["password"]
-        log.info(f"[WSJOBS] Using active account: {username}")
-    else:
-        # FIX B: Try to auto-activate the first available account before falling back
-        all_accounts = get_all_platform_accounts()
-        if all_accounts:
-            set_active_platform_account(all_accounts[0]["id"])
-            active_account = get_active_platform_account()
-            if active_account:
-                username = active_account["username"]
-                password = active_account["password"]
-                log.info(f"[WSJOBS] Auto-activated and using account: {username}")
-            else:
-                log.error("[WSJOBS] Could not activate any account!")
-                return False
-        else:
-            # Last resort: fall back to settings
-            username = get_setting("wsjobs_account", "")
-            password = get_setting("wsjobs_password", "")
-            if not username or not password:
-                log.error("[WSJOBS] No credentials configured! Use /add_account to add an account.")
-                return False
+    log.info(f"[WSJOBS] Using hardcoded credentials: {username}")
     
     http = requests.Session()
     userpwd = _wsjobs_md5(_wsjobs_md5(password))
@@ -1850,7 +1827,7 @@ def _wsjobs_ps():
         s = dict(wsjobs_session)
     if not s.get("http") or not s.get("userid"):
         log.warning("[WSJOBS] Session lost — re-logging in...")
-        wsjobs_login()
+        wsjobs_login()  # This now uses hardcoded credentials
         with wsjobs_lock:
             s = dict(wsjobs_session)
     return s
@@ -8591,7 +8568,8 @@ def _session_keepalive():
                 platform_login()
                 continue
             sign = _s0("/api/user/get_appinfo", str(s["userid"]), s["username"])
-            r = s["http"].get(f"{BASE_URL}/api/user/get_appinfo",
+            # CHANGE THIS: Use WSJOBS_BASE_URL instead of BASE_URL
+            r = s["http"].get(f"{WSJOBS_BASE_URL}/api/user/get_appinfo",
                 params={"page": 1, "pagesize": 1, "username": s["username"],
                         "userid": s["userid"], "sign": sign},
                 headers=_hdrs(), timeout=10)
