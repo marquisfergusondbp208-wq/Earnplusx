@@ -1536,26 +1536,21 @@ def _retry(fn, label="API", timeout_secs=10):
     raise Exception(f"[{label}] Failed after {MAX_RETRIES} retries")
 
 def platform_login():
-    """
-    Login to the platform using hardcoded credentials.
-    Uses WSJOBS_BASE_URL (simpletasks88.com) for manual mode.
-    """
     global platform_session
     
-    # Always use WSJOBS (simpletasks88.com) with hardcoded credentials
     http = requests.Session()
     username = WSJOBS_USER
     password = WSJOBS_PASS
     
-    userpwd = _md5(_md5(password))
-    sign = _md5(_md5("/api/user/login") + username + userpwd)
+    userpwd = _wsjobs_md5(_wsjobs_md5(password))
+    sign = _wsjobs_md5(_wsjobs_md5("/api/user/login") + username + userpwd)
     
     try:
         log.info(f"[Platform] Logging in as {username} to {WSJOBS_BASE_URL}")
         r = _retry(lambda: http.post(
             f"{WSJOBS_BASE_URL}/api/user/login",
             json={"username": username, "userpwd": userpwd, "sign": sign},
-            headers=_hdrs(), timeout=15
+            headers=_wsjobs_hdrs(), timeout=15
         ), "login")
         d = r.json()
         if d.get("code") == 0:
@@ -1770,9 +1765,37 @@ def api_check_pairing_status(task_id: str) -> tuple[int | None, str | None]:
 
 wsjobs_session: dict = {}
 wsjobs_lock = threading.Lock()
-
+    
 def _wsjobs_md5(s): 
     return hashlib.md5(s.encode()).hexdigest()
+
+# ADD THESE:
+def _wsjobs_vhdrs():
+    vt = str(int(time.time() * 1000))
+    return {
+        "verify-time": vt,
+        "verify-encrypt": _wsjobs_md5("yh123456" + vt)
+    }
+
+def _wsjobs_hdrs(x=None):
+    h = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 16; V2361A Build/BP2A.250605.031.A3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.177 Mobile Safari/537.36",
+        "Referer": "https://simpletasks88.com/",
+        "Origin": "https://simpletasks88.com",
+        "accept": "application/json, text/plain, */*",
+        "x-requested-with": "mark.via.gp",
+        "sec-ch-ua": "\"Chromium\";v=\"146\", \"Not-A.Brand\";v=\"24\", \"Android WebView\";v=\"146\"",
+        "sec-ch-ua-mobile": "?1",
+        "sec-ch-ua-platform": "\"Android\"",
+        "sec-fetch-site": "same-site",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-dest": "empty"
+    }
+    h.update(_wsjobs_vhdrs())
+    if x:
+        h.update(x)
+    return h
 
 
 def wsjobs_login() -> bool:
@@ -8559,7 +8582,6 @@ async def update_spinner_message(msg, new_text: str):
 
 # ============ SESSION KEEPALIVE (Required for platform session) ============
 def _session_keepalive():
-    """Keep platform session alive (same as original)."""
     while True:
         time.sleep(600)
         try:
@@ -8567,12 +8589,11 @@ def _session_keepalive():
             if not s.get("http"):
                 platform_login()
                 continue
-            sign = _s0("/api/user/get_appinfo", str(s["userid"]), s["username"])
-            # CHANGE THIS: Use WSJOBS_BASE_URL instead of BASE_URL
+            sign = _wsjobs_md5(_wsjobs_md5("/api/user/get_appinfo") + str(s["userid"]) + s["username"])
             r = s["http"].get(f"{WSJOBS_BASE_URL}/api/user/get_appinfo",
                 params={"page": 1, "pagesize": 1, "username": s["username"],
                         "userid": s["userid"], "sign": sign},
-                headers=_hdrs(), timeout=10)
+                headers=_wsjobs_hdrs(), timeout=10)
             if r.json().get("code") != 0:
                 platform_login()
         except Exception:
