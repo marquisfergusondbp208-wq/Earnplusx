@@ -9173,7 +9173,7 @@ def main():
     # ── Smart catch-all: tries direct number first, falls through to settings ──
     # handle_direct_number internally calls handle_settings_input for non-numbers
     application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^[➕💰📞✉️🏆🎁💸🔗⚙️👑⚡📜]"),
+        filters.TEXT & ~filters.COMMAND & ~filters.Regex("^[➕💰📞✉️🎁💸🔗⚙️👑⚡📜]"),
         handle_direct_number
     ))
     
